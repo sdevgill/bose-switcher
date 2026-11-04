@@ -21,7 +21,8 @@ The app talks to the headphones over Bose's private BMAP protocol on RFCOMM chan
 
 - The headphones hold 2 connections. Connecting a third drops the one that isn't playing.
 - When the Mac isn't connected, a click makes the Mac join for a few seconds, send the command, then leave.
-- The first menu open after the Mac connects takes about 3 seconds. The headphones answer the first request on a new link slowly.
+- The menu opens with the last known state and updates a moment later. All Bluetooth work runs off the main thread.
+- A disconnect shows within a second. A connect takes 5 to 15 seconds, which is the device itself joining.
 - The headphones only connect devices while they're on your head.
 - Only one app on the Mac can talk BMAP at a time, so quit this one before running bosectl.
 - Tested on firmware 10.12.14.

@@ -45,14 +45,26 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         return wait(timeout) { findReply(function, Array(payload.suffix(6))) }
     }
 
-    // Asks for every device's info at once instead of one round trip at a time
-    func devices() -> [PairedDevice] {
-        guard let list = request(listDevices, get), list.op == status else { return [] }
-        let addresses = stride(from: 1, to: list.payload.count - 5, by: 6).map { Array(list.payload[$0 ..< $0 + 6]) }
+    // Listing devices takes the headphones seconds while info replies are instant, so known addresses skip the list
+    func devices(_ known: [[UInt8]]) -> [PairedDevice] {
+        var addresses = known
+        if addresses.isEmpty {
+            guard let list = request(listDevices, get), list.op == status else { return [] }
+            addresses = stride(from: 1, to: list.payload.count - 5, by: 6).map { Array(list.payload[$0 ..< $0 + 6]) }
+        }
         buffer.removeAll()
         addresses.forEach { write(deviceInfo, get, $0) }
         _ = wait(3) { addresses.allSatisfy { findReply(deviceInfo, $0) != nil } ? true : nil }
         return addresses.compactMap { findReply(deviceInfo, $0).flatMap(device) }
+    }
+
+    func waitUntilConnected(_ address: [UInt8], timeout: TimeInterval = 8) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline {
+            if request(deviceInfo, get, address, timeout: 1).flatMap(device)?.connected == true { return true }
+            pump(0.5)
+        }
+        return false
     }
 
     // Info reply: address (6 bytes), state (bit 0 connected, bit 1 active), 2 unknown bytes, then the name
@@ -134,11 +146,46 @@ func macAddress() -> [UInt8] {
     return text.split(separator: ":").compactMap { UInt8($0, radix: 16) }
 }
 
+// Runs Bluetooth work one job at a time on its own run loop, so the menu never waits on the headphones
+final class BluetoothThread: Thread {
+    private var jobs: [() -> Void] = []
+    private var busy = false
+
+    override func main() {
+        RunLoop.current.add(NSMachPort(), forMode: .default)
+        while true { RunLoop.current.run(mode: .default, before: .distantFuture) }
+    }
+
+    func async(_ job: @escaping () -> Void) {
+        perform(#selector(enqueue), on: self, with: Job(job), waitUntilDone: false)
+    }
+
+    // A job pumps the run loop while it waits for replies, so later jobs wait in line instead of running inside it
+    @objc private func enqueue(_ job: Job) {
+        jobs.append(job.run)
+        guard !busy else { return }
+        busy = true
+        while !jobs.isEmpty { jobs.removeFirst()() }
+        busy = false
+    }
+}
+
+final class Job: NSObject {
+    let run: () -> Void
+
+    init(_ run: @escaping () -> Void) {
+        self.run = run
+    }
+}
+
 final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let menu = NSMenu()
+    let bluetooth = BluetoothThread()
+    // devices and live belong to the main thread, link belongs to the Bluetooth thread
     var devices: [PairedDevice] = []
     var live = false
+    var refreshPending = false
     var link: BmapLink?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -148,23 +195,42 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let data = UserDefaults.standard.data(forKey: "devices") {
             devices = (try? JSONDecoder().decode([PairedDevice].self, from: data)) ?? []
         }
-        refresh()
+        bluetooth.start()
+        // Lists devices once per launch to pick up new pairings
+        bluetooth.async { self.refresh(known: []) }
     }
 
+    // Shows the last known state at once and fills in fresh state when the headphones answer
     func menuNeedsUpdate(_ menu: NSMenu) {
-        refresh()
         rebuild()
+        requestRefresh()
     }
 
-    // Reads live states only when the headphones already talk to this Mac, so opening the menu never bumps a device
-    func refresh() {
-        live = false
-        guard let headphones = findHeadphones(), headphones.isConnected(), let link = openLink(headphones) else { return }
-        let fresh = link.devices()
-        guard !fresh.isEmpty else { return }
-        devices = fresh
-        live = true
-        UserDefaults.standard.set(try? JSONEncoder().encode(devices), forKey: "devices")
+    // macOS asks for menu updates often, so a refresh that is already waiting covers the new request too
+    func requestRefresh() {
+        guard !refreshPending else { return }
+        refreshPending = true
+        let known = devices.map(\.address)
+        bluetooth.async { self.refresh(known: known) }
+    }
+
+    // Reads live states only when the headphones already talk to this Mac, so a refresh never bumps a device
+    func refresh(known: [[UInt8]]) {
+        let connected = findHeadphones()?.isConnected() ?? false
+        var fresh: [PairedDevice] = []
+        if connected, let headphones = findHeadphones(), let link = openLink(headphones) {
+            fresh = link.devices(known)
+        }
+        DispatchQueue.main.async {
+            self.refreshPending = false
+            // A missed reply keeps the last known devices instead of claiming the Mac is not connected
+            if !fresh.isEmpty {
+                self.devices = fresh
+                UserDefaults.standard.set(try? JSONEncoder().encode(fresh), forKey: "devices")
+            }
+            self.live = connected && !self.devices.isEmpty
+            self.rebuild()
+        }
     }
 
     // Keeps one link open while the headphones talk to this Mac, because the first reply on a new link takes seconds
@@ -174,49 +240,78 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return link
     }
 
+    // Updates rows in place when the layout is unchanged, so a refresh never swallows a click
     func rebuild() {
-        menu.removeAllItems()
-        if !live {
-            menu.addItem(withTitle: devices.isEmpty ? "Connect the headphones to this Mac once" : "Not connected to this Mac", action: nil, keyEquivalent: "")
+        let offset = live ? 0 : 2
+        let layoutMatches = menu.items.count == offset + devices.count + 2 && (menu.items.first?.action != nil) == live
+        if !layoutMatches {
+            menu.removeAllItems()
+            if !live {
+                menu.addItem(withTitle: devices.isEmpty ? "Connect the headphones to this Mac once" : "Not connected to this Mac", action: nil, keyEquivalent: "")
+                menu.addItem(.separator())
+            }
+            for index in devices.indices {
+                let item = menu.addItem(withTitle: "", action: #selector(toggle), keyEquivalent: "")
+                item.target = self
+                item.tag = index
+            }
             menu.addItem(.separator())
+            menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate), keyEquivalent: "q")
         }
         for (index, device) in devices.enumerated() {
-            let item = menu.addItem(withTitle: device.name + (device.active ? " — playing" : ""), action: #selector(toggle), keyEquivalent: "")
-            item.target = self
-            item.tag = index
+            let item = menu.items[offset + index]
+            item.title = device.name + (device.active ? " — playing" : "")
             item.state = live && device.connected ? .on : .off
         }
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate), keyEquivalent: "q")
     }
 
     // Clicking a connected device disconnects it, clicking any other device connects it
     @objc func toggle(_ item: NSMenuItem) {
         let target = devices[item.tag]
         let disconnecting = live && target.connected
-        guard let headphones = findHeadphones() else { return }
+        let known = devices.map(\.address)
         statusItem.button?.appearsDisabled = true
-        defer { statusItem.button?.appearsDisabled = false }
-
-        let macWasConnected = headphones.isConnected()
-        if !macWasConnected && headphones.openConnection() != kIOReturnSuccess { return }
-        guard let link = openLink(headphones) else { return }
-
-        if disconnecting {
-            beepOnFailure(link.request(disconnect, start, target.address))
-        } else if target.address != macAddress() {
-            beepOnFailure(link.request(connect, start, [0] + target.address))
-            if !macWasConnected {
-                // The Mac only joined to send the command, so it gives its slot back
-                link.pump(4)
-                link.request(disconnect, start, macAddress(), timeout: 1)
+        bluetooth.async {
+            if self.send(target, disconnecting: disconnecting) {
+                DispatchQueue.main.async { self.mark(target, connected: !disconnecting) }
             }
+            self.refresh(known: known)
+            DispatchQueue.main.async { self.statusItem.button?.appearsDisabled = false }
         }
     }
 
+    // Shows a confirmed change at once, because the headphones answer the next refresh slowly
+    func mark(_ target: PairedDevice, connected: Bool) {
+        guard let index = devices.firstIndex(where: { $0.address == target.address }) else { return }
+        devices[index].connected = connected
+        rebuild()
+    }
+
+    // Returns whether the headphones confirmed the change
+    func send(_ target: PairedDevice, disconnecting: Bool) -> Bool {
+        guard let headphones = findHeadphones() else { return false }
+        let macWasConnected = headphones.isConnected()
+        if !macWasConnected && headphones.openConnection() != kIOReturnSuccess { return false }
+        guard let link = openLink(headphones) else { return false }
+
+        if disconnecting {
+            return confirmed(link.request(disconnect, start, target.address))
+        }
+        if target.address == macAddress() { return true }
+        guard confirmed(link.request(connect, start, [0] + target.address)) else { return false }
+        // The Mac stays until the device is connected, so it can show the result or give its slot back
+        let connected = link.waitUntilConnected(target.address)
+        if !macWasConnected {
+            link.request(disconnect, start, macAddress(), timeout: 1)
+        }
+        return connected
+    }
+
     // The headphones refuse some requests, for example a phone they can't reach right now
-    func beepOnFailure(_ reply: Packet?) {
-        if reply?.op == failed { NSSound.beep() }
+    func confirmed(_ reply: Packet?) -> Bool {
+        guard let reply else { return false }
+        if reply.op == failed { DispatchQueue.main.async { NSSound.beep() } }
+        return reply.op != failed
     }
 }
 
