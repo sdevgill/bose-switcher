@@ -1,6 +1,16 @@
 import AppKit
 import IOBluetooth
 
+final class ExpandedInterfaceSession: NSStatusItemExpandedInterfaceSession {
+    var onCancel: (() -> Void)?
+    override func cancel() { onCancel?() }
+}
+
+final class SessionStatusItem: NSStatusItem {
+    var activeSession: NSStatusItemExpandedInterfaceSession?
+    override var expandedInterfaceSession: NSStatusItemExpandedInterfaceSession? { activeSession }
+}
+
 final class BorrowedHeadphones: IOBluetoothDevice {
     var connected = false
     var closes = 0
@@ -49,9 +59,10 @@ struct CoordinatorTests {
         testTerminationDeadline()
         testPanelToggle()
         testPanelDismissal()
+        testSessionDismissal()
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 15 coordinator and artwork behavior checks")
+        print("Passed 16 coordinator and artwork behavior checks")
     }
 
     // Test that a second status item click closes the panel and a third opens it again
@@ -69,7 +80,7 @@ struct CoordinatorTests {
         precondition(!app.panelShown && app.placementTimer == nil)
     }
 
-    // Test that Escape and another app activating both close the panel
+    // Test that Escape and another app activating both close the panel, but the front app reactivating does not
     static func testPanelDismissal() {
         let app = App(makeStatusItem: { NSStatusItem() })
         app.panel.delegate = app
@@ -77,8 +88,42 @@ struct CoordinatorTests {
         app.panel.cancelOperation(nil)
         precondition(!app.panelShown && app.panelTimer == nil)
         app.showPanel()
-        app.otherAppActivated(Notification(name: NSWorkspace.didActivateApplicationNotification))
+        app.frontApp = NSRunningApplication.current
+        let activation = { (running: NSRunningApplication?) in
+            Notification(name: NSWorkspace.didActivateApplicationNotification, object: nil,
+                         userInfo: running.map { [NSWorkspace.applicationUserInfoKey: $0] })
+        }
+        app.otherAppActivated(activation(NSRunningApplication.current))
+        precondition(app.panelShown)
+        app.otherAppActivated(activation(nil))
         precondition(!app.panelShown && app.panelTimer == nil)
+    }
+
+    // Test that closing the panel ends the menu bar session and a click that just closed it cannot reopen it
+    static func testSessionDismissal() {
+        let item = SessionStatusItem()
+        let app = App(makeStatusItem: { item })
+        app.panel.delegate = app
+        var cancellations = 0
+        func begin() -> ExpandedInterfaceSession {
+            let session = ExpandedInterfaceSession()
+            session.onCancel = {
+                cancellations += 1
+                item.activeSession = nil
+                app.statusItemDidEndExpandedInterfaceSession(item, animated: false)
+            }
+            item.activeSession = session
+            app.statusItem(item, didBegin: session)
+            return session
+        }
+        _ = begin()
+        precondition(app.placementTimer != nil)
+        app.showPanel()
+        app.hidePanel()
+        precondition(cancellations == 1 && !app.panelShown && item.activeSession == nil && app.placementTimer == nil)
+        app.ignoreSessionUntil = Date(timeIntervalSinceNow: 0.5)
+        _ = begin()
+        precondition(cancellations == 2 && app.placementTimer == nil && !app.panelShown)
     }
 
     // Test that hover draws rounded light and dark fills without changing layout or intercepting clicks

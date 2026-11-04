@@ -54,7 +54,7 @@ The app is not notarized by Apple. Downloaded ZIPs can carry a quarantine flag. 
 2. Connect the headphones to the Mac in **System Settings → Bluetooth** once to load their paired devices.
 3. Click the headphones-and-arrows menu bar icon. Click a connected device to disconnect it, or another device to connect it.
 
-Blue icons mark connected devices. Rows show **Playing**, **Connected**, or switch progress. This Mac appears first. The panel stays open during a switch; press Escape or click outside to close it.
+Blue icons mark connected devices. Rows show **Playing**, **Connected**, or switch progress. This Mac appears first. The panel stays open during a switch. Click outside it or click the icon again to close it.
 
 ## Start at login
 

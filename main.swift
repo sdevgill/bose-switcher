@@ -3,7 +3,7 @@ import SwiftUI
 import IOBluetooth
 import CoreBluetooth
 
-final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject, CBCentralManagerDelegate {
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItemExpandedInterfaceDelegate, ObservableObject, CBCentralManagerDelegate {
     private(set) var state = DeviceState()
     @Published var actions: [[UInt8]: RowAction] = [:]
     @Published var macConnected = false
@@ -21,6 +21,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     private var panelTopLeft = NSPoint.zero
     private var placementTimer: Timer?
     private var outsideClickMonitor: Any?
+    private var frontApp: NSRunningApplication?
+    private var ignoreSessionUntil = Date.distantPast
 
     private let bluetooth = BluetoothThread()
     private let session = WorkSession()
@@ -65,6 +67,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
             button.image = switcherIcon()
             button.setAccessibilityLabel("Bose Switcher")
         }
+        // The menu bar system owns clicks, keyboard navigation and the highlight through this session
+        statusItem.expandedInterfaceDelegate = self
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
         statusItem.button?.toolTip = "Bose Switcher"
@@ -92,11 +96,19 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(otherAppActivated), name: NSWorkspace.didActivateApplicationNotification, object: nil)
     }
 
-    // Runs on every status item click and on AXPress, so a second click closes the panel
-    @objc private func togglePanel() {
-        if placementTimer != nil && !panelShown { placementTimer?.invalidate(); placementTimer = nil; return }
-        if panelShown { hidePanel(); return }
+    // A real click starts a session, which keeps the item highlighted while the panel is open
+    func statusItem(_ statusItem: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
+        if Date() < ignoreSessionUntil { session.cancel(); return }
         openPanel()
+    }
+
+    // Real clicks go through the session, so only accessibility presses reach this action
+    @objc private func togglePanel() {
+        if panelShown || placementTimer != nil { hidePanel() } else { openPanel() }
+    }
+
+    func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
+        hidePanel()
     }
 
     private func openPanel() {
@@ -110,6 +122,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
             if Date() >= deadline {
                 timer.invalidate()
                 self.placementTimer = nil
+                if !self.panelShown { self.hidePanel() }
             }
         }
     }
@@ -132,11 +145,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         panel.orderFrontRegardless()
         panel.invalidateShadow()
         statusItem.button?.toolTip = nil
-        // The button clears its own highlight when the click ends, so set it after that
-        DispatchQueue.main.async { if self.panelShown { self.statusItem.button?.highlight(true) } }
-        // Clicks in other apps or the menu bar never reach this app, so watch for them globally
+        // Clicks outside the panel, including a second click on the item, go to other processes
+        // The session ends on neither, so the app closes the panel itself
+        frontApp = NSWorkspace.shared.frontmostApplication
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            self?.hidePanel()
+            guard let self else { return }
+            // Without a session, a click on the item would start one and reopen the panel
+            if self.statusItem.expandedInterfaceSession == nil { self.ignoreSessionUntil = Date(timeIntervalSinceNow: 0.5) }
+            self.hidePanel()
         }
         showPanel()
     }
@@ -148,7 +164,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         if panelShown { panel.setFrameTopLeftPoint(panelTopLeft) }
     }
 
-    @objc private func otherAppActivated(_ notification: Notification) { hidePanel() }
+    @objc private func otherAppActivated(_ notification: Notification) {
+        let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        // Clicking the menu bar can reactivate the front app, which must not close the panel
+        if app != frontApp { hidePanel() }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !terminating { beginTermination { sender.reply(toApplicationShouldTerminate: true) } }
@@ -247,10 +267,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         placementTimer = nil
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
         outsideClickMonitor = nil
+        // The menu bar keeps the item highlighted until the session ends
+        statusItem.expandedInterfaceSession?.cancel()
         guard panelShown else { return }
         panelShown = false
         panel.orderOut(nil)
-        statusItem.button?.highlight(false)
         statusItem.button?.toolTip = "Bose Switcher"
         panelTimer?.invalidate()
         panelTimer = nil
