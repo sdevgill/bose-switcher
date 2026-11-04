@@ -54,6 +54,7 @@ struct CoordinatorTests {
         testCancelledBorrow()
         testDiscoveryRetry()
         testDroppedBorrow()
+        testStaleBattery()
         testReplacementBattery(app)
         testRowHover()
         testTerminationCleanup()
@@ -63,7 +64,7 @@ struct CoordinatorTests {
         testSessionDismissal()
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 17 coordinator and artwork behavior checks")
+        print("Passed 18 coordinator and artwork behavior checks")
     }
 
     // Test that a second status item click closes the panel and a third opens it again
@@ -237,6 +238,18 @@ struct CoordinatorTests {
         app.requestRefresh()
         settle(0.2)
         precondition(app.temporaryMac == nil && headphones.closes == 0)
+    }
+
+    // Test that a battery level the headphones stopped reporting disappears
+    static func testStaleBattery() {
+        let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] }, discoverHeadphones: { _ in nil }, makeStatusItem: { NSStatusItem() })
+        app.macConnected = true
+        app.batteryPercent = 80
+        app.batteryAt = monotonicNow().addingTimeInterval(-31)
+        app.showPanel()
+        settle(2.1)
+        precondition(app.batteryPercent == nil)
+        app.hidePanel()
     }
 
     // Test that replacing connected headphones clears the previous battery reading

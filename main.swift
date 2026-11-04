@@ -34,6 +34,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
     private var refreshAgain = false
     private var refreshListAgain = false
     private var lastList = Date.distantPast
+    private var batteryAt = Date.distantPast
     private var nextListAttempt = Date.distantPast
     private var panelTimer: Timer?
     private var cacheSave: DispatchWorkItem?
@@ -270,6 +271,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             panelTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 self.updateState { _ in }
+                // Hide a battery level the headphones have stopped reporting
+                if self.batteryPercent != nil, monotonicNow().timeIntervalSince(self.batteryAt) > 30 { self.batteryPercent = nil }
                 guard !self.actionPending else { return }
                 self.requestRefresh(list: self.shouldRefreshList)
             }
@@ -371,6 +374,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         link?.onBattery = { level in
             DispatchQueue.main.async {
                 guard self.session.accepts(generation), self.macConnected else { return }
+                self.batteryAt = monotonicNow()
                 if self.batteryPercent != level { self.batteryPercent = level }
             }
         }
@@ -517,7 +521,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         if isMac {
             let result = link.disconnectHost(address, cancelled: { !self.session.accepts(generation) },
                                              isConnected: { headphones.isConnected() })
-            if session.accepts(generation) || !headphones.isConnected() { temporaryMac = nil }
+            if !headphones.isConnected() { temporaryMac = nil }
             publishConnection(headphones, connected: headphones.isConnected(), generation: generation)
             finish(target, disconnecting: true, result: result, generation: generation)
             return
