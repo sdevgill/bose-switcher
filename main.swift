@@ -312,6 +312,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             guard self.session.accepts(generation) else { return }
             let headphones = self.discoverHeadphones { self.bluetooth.actionQueued || !self.session.accepts(generation) }
             let connected = headphones?.isConnected() ?? false
+            // A borrowed connection that has since dropped is gone, so a later user connection is not ours to close
+            if !connected { self.temporaryMac = nil }
             let previous = UserDefaults.standard.string(forKey: "deviceCacheHeadphones")
             let replaced = previous != nil && headphones?.addressString != previous
             self.publishConnection(headphones, connected: connected, generation: generation)
@@ -375,7 +377,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         link?.onClose = {
             guard self.session.accepts(generation) else { return }
             let headphones = self.discoverHeadphones { self.bluetooth.actionQueued || !self.session.accepts(generation) }
-            self.publishConnection(headphones, connected: headphones?.isConnected() ?? false, generation: generation)
+            let connected = headphones?.isConnected() ?? false
+            if !connected { self.temporaryMac = nil }
+            self.publishConnection(headphones, connected: connected, generation: generation)
         }
         return link
     }

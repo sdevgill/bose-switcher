@@ -53,6 +53,7 @@ struct CoordinatorTests {
         testVisibleExpiry(app)
         testCancelledBorrow()
         testDiscoveryRetry()
+        testDroppedBorrow()
         testReplacementBattery(app)
         testRowHover()
         testTerminationCleanup()
@@ -62,7 +63,7 @@ struct CoordinatorTests {
         testSessionDismissal()
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 16 coordinator and artwork behavior checks")
+        print("Passed 17 coordinator and artwork behavior checks")
     }
 
     // Test that a second status item click closes the panel and a third opens it again
@@ -221,6 +222,21 @@ struct CoordinatorTests {
         app.listNeeded = false
         app.lastList = Date()
         precondition(!app.shouldRefreshList)
+    }
+
+    // Test that a borrowed connection that already dropped is forgotten so a later user connection is kept
+    static func testDroppedBorrow() {
+        let headphones = BorrowedHeadphones()
+        let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] },
+                      discoverHeadphones: { _ in headphones }, makeStatusItem: { NSStatusItem() })
+        app.bluetooth.start()
+        defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+        app.session.begin(available: true)
+        app.bluetoothStatus = nil
+        app.temporaryMac = headphones
+        app.requestRefresh()
+        settle(0.2)
+        precondition(app.temporaryMac == nil && headphones.closes == 0)
     }
 
     // Test that replacing connected headphones clears the previous battery reading
