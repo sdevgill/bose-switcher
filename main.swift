@@ -16,7 +16,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     private lazy var statusItem = makeStatusItem()
     private let makeStatusItem: () -> NSStatusItem
     private let hostAddress: () -> [UInt8]
-    private let discoverHeadphones: () -> IOBluetoothDevice?
+    private let discoverHeadphones: (() -> Bool) -> IOBluetoothDevice?
     private let statusLabel = StatusLabel()
     private let panel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var panelTopLeft = NSPoint.zero
@@ -37,12 +37,15 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     private var listNeeded = true
     private var completedActions: [[UInt8]: UUID] = [:]
     private var displayedFresh: Set<[UInt8]> = []
+    private var terminating = false
     // Only the Bluetooth thread touches the link
     private var link: BmapLink?
     private var temporaryMac: IOBluetoothDevice?
 
     init(hostAddress: @escaping () -> [UInt8] = macAddress,
-         discoverHeadphones: @escaping () -> IOBluetoothDevice? = { findHeadphones() },
+         discoverHeadphones: @escaping (() -> Bool) -> IOBluetoothDevice? = { cancelled in
+             findHeadphones(scan: { scanHeadphones(cancelled: cancelled) })
+         },
          makeStatusItem: @escaping () -> NSStatusItem = { NSStatusBar.system.statusItem(withLength: 36) }) {
         self.hostAddress = hostAddress
         self.discoverHeadphones = discoverHeadphones
@@ -134,8 +137,40 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
 
     func windowDidResignKey(_ notification: Notification) { hidePanel() }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if !terminating { beginTermination { sender.reply(toApplicationShouldTerminate: true) } }
+        return .terminateLater
+    }
+
+    // Let cancelled work release its borrowed connection, with a hard deadline for blocked system calls
+    private func beginTermination(completion: @escaping () -> Void) {
+        terminating = true
+        hidePanel()
+        session.begin(available: false)
+        let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+        var replied = false
+        let finish = {
+            guard !replied else { return }
+            replied = true
+            completion()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: finish)
+        bluetooth.async(action: true) {
+            let borrowed = self.temporaryMac
+            borrowed?.closeConnection()
+            self.temporaryMac = nil
+            self.link?.close()
+            self.link = nil
+            while borrowed?.isConnected() == true && ProcessInfo.processInfo.systemUptime < deadline {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+            }
+            DispatchQueue.main.async(execute: finish)
+        }
+    }
+
     // Ask asynchronously before entering IOBluetooth's blocking permission wait
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard !terminating else { return }
         endSession(available: central.state == .poweredOn)
         switch central.state {
         case .poweredOn:
@@ -225,7 +260,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         let known = state.knownAddresses
         bluetooth.async {
             guard self.session.accepts(generation) else { return }
-            let headphones = self.discoverHeadphones()
+            let headphones = self.discoverHeadphones { self.bluetooth.actionQueued || !self.session.accepts(generation) }
             let connected = headphones?.isConnected() ?? false
             let previous = UserDefaults.standard.string(forKey: "deviceCacheHeadphones")
             let replaced = previous != nil && headphones?.addressString != previous
@@ -286,7 +321,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
             }
         }
         link?.onClose = {
-            let headphones = self.discoverHeadphones()
+            guard self.session.accepts(generation) else { return }
+            let headphones = self.discoverHeadphones { self.bluetooth.actionQueued || !self.session.accepts(generation) }
             self.publishConnection(headphones, connected: headphones?.isConnected() ?? false, generation: generation)
         }
         return link
@@ -350,7 +386,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     private func send(_ target: PairedDevice, disconnecting: Bool, needsReading: Bool, cleanupOwner: UUID?, generation: Int) {
         guard session.accepts(generation) else { return }
         var disconnecting = disconnecting
-        guard let headphones = discoverHeadphones() else {
+        guard let headphones = discoverHeadphones({ !self.session.accepts(generation) }) else {
             finish(target, disconnecting: disconnecting, result: .timeout, generation: generation)
             return
         }
@@ -374,12 +410,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
             if let borrowed = temporaryMac, (!isMac || !session.accepts(generation)),
                (!session.accepts(generation) || !bluetooth.actionQueued) {
                 // Return a borrowed slot even if Info or the command channel failed
-                temporaryMac = nil
                 let closed = borrowed.closeConnection() == kIOReturnSuccess
                 let deadline = Date(timeIntervalSinceNow: 3)
-                while closed && borrowed.isConnected() && Date() < deadline {
+                while closed && session.accepts(generation) && borrowed.isConnected() && Date() < deadline {
                     RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
                 }
+                if session.accepts(generation) || !borrowed.isConnected() { temporaryMac = nil }
                 publishConnection(borrowed, connected: borrowed.isConnected(), generation: generation)
                 if !closed || borrowed.isConnected() {
                     DispatchQueue.main.async {
@@ -407,7 +443,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         if !isMac, let connected = latest.connected { disconnecting = connected }
         let needsReading = needsReading || !latest.fresh
         if needsReading && !isMac {
-            guard let reading = link.readDevice(target.address) else {
+            guard let reading = link.readDevice(target.address, cancelled: { !self.session.accepts(generation) }) else {
                 finish(target, disconnecting: disconnecting, result: .timeout, generation: generation)
                 return
             }
@@ -422,16 +458,17 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         }
         guard session.accepts(generation) else { return }
         if isMac {
-            let result = link.disconnectHost(address, isConnected: { headphones.isConnected() })
-            temporaryMac = nil
+            let result = link.disconnectHost(address, cancelled: { !self.session.accepts(generation) },
+                                             isConnected: { headphones.isConnected() })
+            if session.accepts(generation) || !headphones.isConnected() { temporaryMac = nil }
             publishConnection(headphones, connected: headphones.isConnected(), generation: generation)
             finish(target, disconnecting: true, result: result, generation: generation)
             return
         }
         let began = Date()
         let reply = disconnecting
-            ? link.request(disconnect, start, target.address)
-            : link.request(connect, start, [0] + target.address)
+            ? link.request(disconnect, start, target.address, yielding: { !self.session.accepts(generation) })
+            : link.request(connect, start, [0] + target.address, yielding: { !self.session.accepts(generation) })
         let result: ActionResult
         if reply?.operation == failed {
             result = .refused

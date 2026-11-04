@@ -1,5 +1,6 @@
 import Foundation
 import IOBluetooth
+import Darwin
 
 let bmapChannel: BluetoothRFCOMMChannelID = 2
 let get: UInt8 = 1, start: UInt8 = 5, status: UInt8 = 3, failed: UInt8 = 4
@@ -89,11 +90,12 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     // The Mac gets no disconnect reply, so check its physical connection
-    func disconnectHost(_ address: [UInt8], timeout: TimeInterval = 3, isConnected: () -> Bool) -> ActionResult {
+    func disconnectHost(_ address: [UInt8], timeout: TimeInterval = 3, cancelled: () -> Bool = { false },
+                        isConnected: () -> Bool) -> ActionResult {
         let began = Date()
-        let reply = request(disconnect, start, address, timeout: min(1, timeout))
+        let reply = request(disconnect, start, address, timeout: min(1, timeout), yielding: cancelled)
         if reply?.operation == failed { return .refused }
-        while isConnected() && Date().timeIntervalSince(began) < timeout { pump(0.02) }
+        while !cancelled() && isConnected() && Date().timeIntervalSince(began) < timeout { pump(0.02) }
         return isConnected() ? .timeout : .confirmed
     }
 
@@ -117,10 +119,10 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         return reply
     }
 
-    func readDevice(_ address: [UInt8]) -> PairedDevice? {
+    func readDevice(_ address: [UInt8], cancelled: () -> Bool = { false }) -> PairedDevice? {
         let began = Date()
         requestInfo(address)
-        let reading: PairedDevice? = wait(3) {
+        let reading: PairedDevice? = wait(3, yielding: cancelled) {
             guard let reading = self.readings[address], reading.requestedAt >= began else { return nil }
             return reading.device
         }
@@ -252,7 +254,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
 func findHeadphones(defaults: UserDefaults = .standard,
                     lookup: (String) -> IOBluetoothDevice? = { IOBluetoothDevice(addressString: $0) },
-                    scan: () -> String? = scanHeadphones) -> IOBluetoothDevice? {
+                    scan: () -> String? = { scanHeadphones() }) -> IOBluetoothDevice? {
     if let saved = defaults.string(forKey: "headphones"),
        let device = lookup(saved), device.isPaired() { return device }
     defaults.removeObject(forKey: "headphones")
@@ -262,15 +264,28 @@ func findHeadphones(defaults: UserDefaults = .standard,
 }
 
 // Isolate pairedDevices because it breaks isConnected in the calling process
-private func scanHeadphones() -> String? {
-    let scan = Process()
+func scanHeadphones(timeout: TimeInterval = 3, cancelled: () -> Bool = { false }, scan: Process = Process()) -> String? {
+    guard !cancelled() else { return nil }
     let output = Pipe()
-    scan.executableURL = Bundle.main.executableURL
-    scan.arguments = ["--scan"]
+    defer {
+        output.fileHandleForReading.closeFile()
+        output.fileHandleForWriting.closeFile()
+    }
+    if scan.executableURL == nil { scan.executableURL = Bundle.main.executableURL }
+    if scan.arguments == nil { scan.arguments = ["--scan"] }
     scan.standardOutput = output
+    let finished = DispatchSemaphore(value: 0)
+    scan.terminationHandler = { _ in finished.signal() }
     guard (try? scan.run()) != nil else { return nil }
-    scan.waitUntilExit()
-    guard scan.terminationStatus == 0 else { return nil }
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    while finished.wait(timeout: .now() + 0.02) == .timedOut {
+        if cancelled() || ProcessInfo.processInfo.systemUptime >= deadline {
+            // A stuck Bluetooth call may ignore SIGTERM
+            if scan.isRunning { kill(scan.processIdentifier, SIGKILL) }
+            return nil
+        }
+    }
+    guard !cancelled(), scan.terminationStatus == 0 else { return nil }
     let address = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !address.isEmpty else { return nil }
     return address

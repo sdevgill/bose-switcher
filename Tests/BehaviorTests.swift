@@ -42,6 +42,8 @@ struct BehaviorTests {
     static let computer: [UInt8] = [6, 5, 4, 3, 2, 1]
 
     static func main() {
+        if CommandLine.arguments.contains("--scan-stall") { Thread.sleep(forTimeInterval: 30); return }
+        if CommandLine.arguments.contains("--scan-success") { print("test-headphones"); return }
         testReplyAddresses()
         testBatteryReply()
         testConfirmedState()
@@ -63,7 +65,69 @@ struct BehaviorTests {
         testStableRediscovery()
         testDistinctNames()
         testReplacementDiscovery()
-        print("Passed 21 hardware-free behavior checks")
+        testScanLifetime()
+        testScanActionPriority()
+        testCancelledWaits()
+        print("Passed 24 hardware-free behavior checks")
+    }
+
+    // Test that successful scans return output and timed-out or cancelled children are killed
+    static func testScanLifetime() {
+        let success = Process()
+        success.arguments = ["--scan-success"]
+        precondition(scanHeadphones(scan: success) == "test-headphones")
+        for cancel in [false, true] {
+            let child = Process()
+            child.arguments = ["--scan-stall"]
+            let began = Date()
+            precondition(scanHeadphones(timeout: cancel ? 3 : 0.1,
+                                       cancelled: { cancel && Date().timeIntervalSince(began) > 0.1 }, scan: child) == nil)
+            precondition(Date().timeIntervalSince(began) < 0.5)
+            child.waitUntilExit()
+            precondition(child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
+        }
+        let cancelled = Process()
+        precondition(scanHeadphones(cancelled: { true }, scan: cancelled) == nil && !cancelled.isRunning)
+    }
+
+    // Test that a queued action kills the scanning child and runs without waiting for its timeout
+    static func testScanActionPriority() {
+        let thread = BluetoothThread()
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        let child = Process()
+        child.arguments = ["--scan-stall"]
+        thread.start()
+        defer { thread.cancel(); thread.async {} }
+        thread.async {
+            var signalled = false
+            precondition(scanHeadphones(cancelled: {
+                if child.isRunning && !signalled { signalled = true; started.signal() }
+                return thread.actionQueued
+            }, scan: child) == nil)
+        }
+        precondition(started.wait(timeout: .now() + 1) == .success)
+        thread.async(action: true) { finished.signal() }
+        precondition(finished.wait(timeout: .now() + 0.5) == .success)
+        child.waitUntilExit()
+        precondition(child.terminationStatus == SIGKILL)
+    }
+
+    // Test that cancellation interrupts each command wait so shutdown can release the borrowed slot
+    static func testCancelledWaits() {
+        for operation in 0..<4 {
+            let channel = FakeChannel()
+            let link = BmapLink(channel: channel)
+            let began = Date()
+            let cancelled = { Date().timeIntervalSince(began) > 0.05 }
+            switch operation {
+            case 0: precondition(link.readDevice(phone, cancelled: cancelled) == nil)
+            case 1: precondition(link.request(connect, start, [0] + phone, yielding: cancelled) == nil)
+            case 2: precondition(link.disconnectHost(computer, cancelled: cancelled, isConnected: { true }) == .timeout)
+            default: precondition(link.waitUntilConnected(phone, since: began, cancelled: cancelled) == .timeout)
+            }
+            precondition(Date().timeIntervalSince(began) < 0.3 && !link.isOpen)
+        }
     }
 
     // Test that shadow space preserves the visible panel's size, anchor and clickable bounds

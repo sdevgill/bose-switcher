@@ -30,7 +30,7 @@ struct CoordinatorTests {
     static func main() {
         _ = NSApplication.shared
         let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] },
-                      discoverHeadphones: { preconditionFailure("Unexpected headphone discovery") },
+                      discoverHeadphones: { _ in preconditionFailure("Unexpected headphone discovery") },
                       makeStatusItem: { NSStatusItem() })
         app.bluetooth.start()
         app.session.begin(available: true)
@@ -44,15 +44,96 @@ struct CoordinatorTests {
         testCancelledBorrow()
         testDiscoveryRetry()
         testReplacementBattery(app)
+        testRowHover()
+        testTerminationCleanup()
+        testTerminationDeadline()
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 10 coordinator and artwork behavior checks")
+        print("Passed 13 coordinator and artwork behavior checks")
+    }
+
+    // Test that hover draws rounded light and dark fills without changing layout or intercepting clicks
+    static func testRowHover() {
+        let row = RowHighlightView()
+        row.frame = NSRect(x: 0, y: 0, width: 240, height: 38)
+        let frame = row.frame
+        func pixel(_ x: Int, _ y: Int) -> NSColor {
+            let image = NSImage(size: frame.size, flipped: false) { _ in
+                row.effectiveAppearance.performAsCurrentDrawingAppearance { row.draw(row.bounds) }
+                return true
+            }
+            return NSBitmapImageRep(data: image.tiffRepresentation!)!.colorAt(x: x, y: y)!
+        }
+        var fills: [NSColor] = []
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            row.appearance = NSAppearance(named: appearance)
+            precondition(pixel(120, 19).alphaComponent == 0)
+            row.mouseEntered(with: NSEvent())
+            let fill = pixel(120, 19)
+            precondition(fill.alphaComponent > 0 && fill.alphaComponent < 0.3)
+            precondition(pixel(0, 0).alphaComponent == 0)
+            fills.append(fill)
+            row.enabled = false
+            precondition(pixel(120, 19).alphaComponent == 0)
+            row.enabled = true
+            row.mouseExited(with: NSEvent())
+            precondition(pixel(120, 19).alphaComponent == 0)
+        }
+        precondition(fills[0] != fills[1] && row.frame == frame && row.hitTest(.zero) == nil)
+    }
+
+    // Test that quitting during a borrowed connection releases it before replying once
+    static func testTerminationCleanup() {
+        let headphones = BorrowedHeadphones()
+        let opened = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] },
+                      discoverHeadphones: { _ in headphones }, makeStatusItem: { NSStatusItem() })
+        app.bluetooth.start()
+        defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+        app.session.begin(available: true)
+        let generation = app.session.current
+        headphones.onOpen = { opened.signal(); resume.wait() }
+        app.bluetooth.async(action: true) {
+            app.send(PairedDevice(address: [1, 2, 3, 4, 5, 6], name: "Phone"),
+                     disconnecting: false, needsReading: true, cleanupOwner: nil, generation: generation)
+        }
+        precondition(opened.wait(timeout: .now() + 1) == .success)
+        var replies = 0
+        app.beginTermination {
+            precondition(!headphones.connected && headphones.closes == 1 && app.temporaryMac == nil)
+            replies += 1
+        }
+        resume.signal()
+        settle(0.2)
+        precondition(replies == 1 && !app.session.accepts(generation))
+        settle(1.4)
+        precondition(replies == 1)
+    }
+
+    // Test that a blocked system call cannot delay the quit reply past the cleanup deadline
+    static func testTerminationDeadline() {
+        let app = App(makeStatusItem: { NSStatusItem() })
+        app.bluetooth.start()
+        defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+        let started = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        app.bluetooth.async { started.signal(); resume.wait() }
+        precondition(started.wait(timeout: .now() + 1) == .success)
+        var replies = 0
+        let began = Date()
+        app.beginTermination { replies += 1 }
+        while replies == 0 && Date().timeIntervalSince(began) < 1.8 { settle(0.01) }
+        precondition(replies == 1 && Date().timeIntervalSince(began) < 1.7)
+        resume.signal()
+        settle()
+        precondition(replies == 1)
     }
 
     // Test that unsuccessful initial discovery retries without the successful-list throttle
     static func testDiscoveryRetry() {
         let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] },
-                      discoverHeadphones: { nil }, makeStatusItem: { NSStatusItem() })
+                      discoverHeadphones: { _ in nil }, makeStatusItem: { NSStatusItem() })
         app.bluetooth.start()
         defer { app.bluetooth.cancel(); app.bluetooth.async {} }
         app.session.begin(available: true)
@@ -85,7 +166,7 @@ struct CoordinatorTests {
     static func testCancelledBorrow() {
         let headphones = BorrowedHeadphones()
         let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] },
-                      discoverHeadphones: { headphones }, makeStatusItem: { NSStatusItem() })
+                      discoverHeadphones: { _ in headphones }, makeStatusItem: { NSStatusItem() })
         app.session.begin(available: true)
         headphones.onOpen = { app.session.begin(available: false) }
         app.send(PairedDevice(address: [1, 2, 3, 4, 5, 6], name: "Phone"),

@@ -96,7 +96,7 @@ struct SwitcherPanel: View {
                     .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
                     .padding(.horizontal, 10).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DeviceButtonStyle())
             .keyboardShortcut("q", modifiers: .command)
             .accessibilityLabel("Quit Bose Switcher")
         }
@@ -215,7 +215,51 @@ private struct DeviceRow: View {
 private struct DeviceButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(configuration.isPressed ? PanelStyle.circle : .clear, in: RoundedRectangle(cornerRadius: 12))
+            .background { RowHighlight(pressed: configuration.isPressed) }
+    }
+}
+
+private struct RowHighlight: NSViewRepresentable {
+    let pressed: Bool
+    @Environment(\.isEnabled) private var enabled
+
+    func makeNSView(context: Context) -> RowHighlightView { RowHighlightView() }
+
+    func updateNSView(_ view: RowHighlightView, context: Context) {
+        view.pressed = pressed
+        view.enabled = enabled
+    }
+}
+
+// Redraw only the row's background, without publishing hover changes to SwiftUI
+final class RowHighlightView: NSView {
+    var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
+    var enabled = true { didSet { if enabled != oldValue { needsDisplay = true } } }
+    private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
+
+    init() {
+        super.init(frame: .zero)
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                      owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true }
+    override func mouseExited(with event: NSEvent) { hovered = false }
+    override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard enabled && (hovered || pressed) else { return }
+        NSColor.quaternaryLabelColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12).fill()
     }
 }
 

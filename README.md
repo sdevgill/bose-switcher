@@ -38,9 +38,9 @@ Blue icons mark connected devices. The row shows **Playing**, **Connected**, or 
 
 ## How it works
 
-The app talks directly to the headphones using Bose's private BMAP protocol over Bluetooth RFCOMM channel 2. Bluetooth work runs on a separate thread, with clicks taking priority over refreshes. The panel refreshes connection states every two seconds while open.
+The app talks directly to the headphones using Bose's private BMAP protocol over Bluetooth RFCOMM channel 2. Bluetooth work runs on a separate thread, with clicks taking priority over refreshes. Paired-device scans stop after three seconds or when interrupted by a queued action. The panel refreshes connection states every two seconds while open.
 
-Device names and addresses are cached in local app preferences. There is no cloud service or telemetry. When the Mac is disconnected, the panel shows cached devices without live connection states or battery. Clicking a device can temporarily connect the Mac to send the command, then disconnect it again.
+Device names and addresses are cached in local app preferences. There is no cloud service or telemetry. When the Mac is disconnected, the panel shows cached devices without live connection states or battery. Clicking a device can temporarily connect the Mac to send the command, then disconnect it again. Quitting allows up to 1.5 seconds to release that temporary connection.
 
 ## Limits
 
