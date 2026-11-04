@@ -11,9 +11,10 @@ private enum PanelStyle {
     static let accentText = color(0x0a64d6, 0x6ab3ff)
     static let circle = color(0x000000, 0xffffff, lightAlpha: 0.07, darkAlpha: 0.12)
     static let line = color(0x000000, 0xffffff, lightAlpha: 0.09, darkAlpha: 0.10)
-    static let glass = color(0xf6f7fb, 0x2a2a30, lightAlpha: 0.60, darkAlpha: 0.55)
+    static let glass = color(0xf6f7fb, 0x2a2a30, lightAlpha: 0.40, darkAlpha: 0.35)
     static let rim = color(0xffffff, 0xffffff, lightAlpha: 0.95, darkAlpha: 0.22)
     static let inner = color(0xffffff, 0xffffff, lightAlpha: 0.45, darkAlpha: 0.07)
+    static let shadow = color(0x142448, 0x000000, lightAlpha: 0.34, darkAlpha: 0.70)
 
     private static func color(_ light: UInt32, _ dark: UInt32, lightAlpha: CGFloat = 1, darkAlpha: CGFloat = 1) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -28,6 +29,7 @@ private enum PanelStyle {
 
 struct SwitcherPanel: View {
     @ObservedObject var app: App
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -102,14 +104,42 @@ struct SwitcherPanel: View {
         .padding(8)
         .frame(width: 256)
         .foregroundStyle(PanelStyle.strong)
-        .background(.ultraThinMaterial, in: .rect(cornerRadius: 22))
-        .glassEffect(.clear.tint(PanelStyle.glass), in: .rect(cornerRadius: 22))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22)
-                .strokeBorder(LinearGradient(colors: [PanelStyle.rim, PanelStyle.inner], startPoint: .top, endPoint: .bottom), lineWidth: 1)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+        .background {
+            Color.clear
+                .glassEffect(.regular.tint(.clear), in: .rect(cornerRadius: 22))
+                .saturation(colorScheme == .dark ? 1.3 : 1.8)
+                .brightness(colorScheme == .dark ? -0.08 : -0.035)
+                .overlay { RoundedRectangle(cornerRadius: 22).fill(PanelStyle.glass) }
         }
+        .overlay {
+            ZStack {
+                RoundedRectangle(cornerRadius: 22)
+                    .strokeBorder(PanelStyle.inner, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 22)
+                    .strokeBorder(PanelStyle.rim, lineWidth: 1)
+                    .mask(alignment: .top) { Rectangle().frame(height: 1) }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+}
+
+// Draw the broad shadow outside the glass so it cannot darken the translucent content
+struct PanelShadow: View {
+    var body: some View {
+        Canvas { context, size in
+            let panel = CGRect(x: PanelLayout.shadowSide, y: PanelLayout.shadowTop,
+                               width: size.width - 2 * PanelLayout.shadowSide,
+                               height: size.height - PanelLayout.shadowTop - PanelLayout.shadowBottom)
+            var outside = Path(CGRect(origin: .zero, size: size))
+            outside.addRoundedRect(in: panel, cornerSize: CGSize(width: 22, height: 22))
+            context.clip(to: outside, style: FillStyle(eoFill: true))
+            context.addFilter(.shadow(color: PanelStyle.shadow, radius: 22, x: 0, y: 18, options: .shadowOnly))
+            context.fill(Path(roundedRect: panel.insetBy(dx: 10, dy: 10), cornerRadius: 12), with: .color(.black))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

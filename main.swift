@@ -70,15 +70,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         panel.level = .popUpMenu
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         let view = NSHostingView(rootView: SwitcherPanel(app: self)
-            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { self.resizePanel($0) }))
+            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { self.resizePanel($0) })
+            .padding(EdgeInsets(top: PanelLayout.shadowTop, leading: PanelLayout.shadowSide,
+                                bottom: PanelLayout.shadowBottom, trailing: PanelLayout.shadowSide))
+            .background { PanelShadow() })
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.clear.cgColor
-        view.layer?.cornerRadius = 22
-        view.layer?.masksToBounds = true
         panel.contentView = view
         panel.setContentSize(view.fittingSize)
         bluetooth.start()
@@ -107,9 +108,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         let accessible = button.accessibilityFrame()
         if abs(accessible.midX - anchor.midX) < 2 { anchor.origin.x = accessible.minX }
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }),
-              let origin = panelOrigin(anchor: anchor, screen: screen.frame, visible: screen.visibleFrame, size: panel.frame.size) else { return false }
-        panelTopLeft = origin
-        panel.setFrameTopLeftPoint(origin)
+              let origin = panelOrigin(anchor: anchor, screen: screen.frame, visible: screen.visibleFrame,
+                                       size: PanelLayout.contentSize(in: panel.frame.size)) else { return false }
+        panelTopLeft = PanelLayout.windowOrigin(for: origin)
+        panel.setFrameTopLeftPoint(panelTopLeft)
         return true
     }
 
@@ -123,8 +125,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     }
 
     private func resizePanel(_ size: CGSize) {
-        guard size.width > 0, size.height > 0, panel.frame.size != size else { return }
-        panel.setContentSize(size)
+        let windowSize = PanelLayout.windowSize(for: size)
+        guard size.width > 0, size.height > 0, panel.frame.size != windowSize else { return }
+        panel.setContentSize(windowSize)
         if panelShown { panel.setFrameTopLeftPoint(panelTopLeft) }
     }
 
@@ -514,4 +517,13 @@ struct BoseSwitcher {
 final class MenuPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { (delegate as? App)?.hidePanel() }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .rightMouseDown,
+           !PanelLayout.contentRect(in: frame.size).contains(event.locationInWindow) {
+            (delegate as? App)?.hidePanel()
+            return
+        }
+        super.sendEvent(event)
+    }
 }

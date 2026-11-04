@@ -55,6 +55,7 @@ struct BehaviorTests {
         testListValidationAndEarlyOrder()
         testHostDisconnectFailure()
         testEarlyPanelPlacement()
+        testShadowPlacement()
         testLostConnectionPoll()
         testColdConnectionPoll()
         testReadingExpiry()
@@ -62,7 +63,21 @@ struct BehaviorTests {
         testStableRediscovery()
         testDistinctNames()
         testReplacementDiscovery()
-        print("Passed 20 hardware-free behavior checks")
+        print("Passed 21 hardware-free behavior checks")
+    }
+
+    // Test that shadow space preserves the visible panel's size, anchor and clickable bounds
+    static func testShadowPlacement() {
+        let content = CGSize(width: 256, height: 347)
+        let window = PanelLayout.windowSize(for: content)
+        precondition(PanelLayout.contentSize(in: window) == content)
+        let origin = CGPoint(x: 300, y: 1042)
+        let windowOrigin = PanelLayout.windowOrigin(for: origin)
+        let rectangle = PanelLayout.contentRect(in: window)
+        precondition(windowOrigin.x + rectangle.minX == origin.x)
+        precondition(windowOrigin.y - window.height + rectangle.maxY == origin.y)
+        precondition(!rectangle.contains(CGPoint(x: 16, y: 100)))
+        precondition(rectangle.contains(CGPoint(x: 50, y: 100)))
     }
 
     // Test that forgetting a cached pair discovers its replacement but an offline pair stays selected
