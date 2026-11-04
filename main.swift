@@ -45,7 +45,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
          discoverHeadphones: @escaping (() -> Bool) -> IOBluetoothDevice? = { cancelled in
              findHeadphones(scan: { scanHeadphones(cancelled: cancelled) })
          },
-         makeStatusItem: @escaping () -> NSStatusItem = { NSStatusBar.system.statusItem(withLength: 36) }) {
+         makeStatusItem: @escaping () -> NSStatusItem = { NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength) }) {
         self.hostAddress = hostAddress
         self.discoverHeadphones = discoverHeadphones
         self.makeStatusItem = makeStatusItem
@@ -151,7 +151,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         if panelShown { panel.setFrameTopLeftPoint(panelTopLeft) }
     }
 
-    func windowDidResignKey(_ notification: Notification) { hidePanel() }
+    func windowDidResignKey(_ notification: Notification) {
+        // Let native tracking handle a second status-item click before cancelling its session
+        // AXPress opens without a session, so it still needs focus-based dismissal
+        if statusItem.expandedInterfaceSession == nil { hidePanel() }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !terminating { beginTermination { sender.reply(toApplicationShouldTerminate: true) } }

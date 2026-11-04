@@ -1,6 +1,16 @@
 import AppKit
 import IOBluetooth
 
+final class ExpandedInterfaceSession: NSStatusItemExpandedInterfaceSession {
+    var onCancel: (() -> Void)?
+    override func cancel() { onCancel?() }
+}
+
+final class SessionStatusItem: NSStatusItem {
+    var activeSession: NSStatusItemExpandedInterfaceSession?
+    override var expandedInterfaceSession: NSStatusItemExpandedInterfaceSession? { activeSession }
+}
+
 final class BorrowedHeadphones: IOBluetoothDevice {
     var connected = false
     var closes = 0
@@ -47,9 +57,73 @@ struct CoordinatorTests {
         testRowHover()
         testTerminationCleanup()
         testTerminationDeadline()
+        testNativePanelToggle()
+        testPanelEscape()
+        testAccessiblePanelDismissal()
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 13 coordinator and artwork behavior checks")
+        print("Passed 16 coordinator and artwork behavior checks")
+    }
+
+    // Test that losing focus before the second native click cannot cancel and reopen the panel
+    static func testNativePanelToggle() {
+        let item = SessionStatusItem()
+        let app = App(makeStatusItem: { item })
+        app.panel.delegate = app
+        let notification = Notification(name: NSWindow.didResignKeyNotification, object: app.panel)
+        func begin() {
+            let session = ExpandedInterfaceSession()
+            session.onCancel = {
+                item.activeSession = nil
+                app.statusItemDidEndExpandedInterfaceSession(item, animated: false)
+            }
+            item.activeSession = session
+            app.statusItem(item, didBegin: session)
+            precondition(app.placementTimer != nil)
+            app.showPanel()
+        }
+        begin()
+        app.windowDidResignKey(notification)
+        precondition(app.panelShown && item.activeSession != nil)
+        // Native tracking ends the existing session on the second click
+        item.activeSession?.cancel()
+        precondition(!app.panelShown && app.placementTimer == nil && app.panelTimer == nil)
+        // A third click starts a new session without a debounce delay
+        begin()
+        precondition(app.panelShown)
+        // An outside click also ends the session
+        item.activeSession?.cancel()
+        precondition(!app.panelShown && item.activeSession == nil)
+    }
+
+    // Test that Escape closes the panel and cancels its native session
+    static func testPanelEscape() {
+        let item = SessionStatusItem()
+        let app = App(makeStatusItem: { item })
+        app.panel.delegate = app
+        let session = ExpandedInterfaceSession()
+        var cancellations = 0
+        session.onCancel = {
+            cancellations += 1
+            item.activeSession = nil
+            app.statusItemDidEndExpandedInterfaceSession(item, animated: false)
+        }
+        item.activeSession = session
+        app.showPanel()
+        app.panel.cancelOperation(nil)
+        precondition(cancellations == 1 && !app.panelShown && item.activeSession == nil)
+        precondition(app.panelTimer == nil)
+    }
+
+    // Test that accessibility opening still closes on focus loss and on a second press
+    static func testAccessiblePanelDismissal() {
+        let app = App(makeStatusItem: { NSStatusItem() })
+        app.showPanel()
+        app.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: app.panel))
+        precondition(!app.panelShown && app.panelTimer == nil)
+        app.showPanel()
+        app.togglePanel()
+        precondition(!app.panelShown && app.panelTimer == nil)
     }
 
     // Test that hover draws rounded light and dark fills without changing layout or intercepting clicks
