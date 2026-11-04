@@ -1,8 +1,6 @@
 import AppKit
 import IOBluetooth
 
-// UUID of the BMAP control service that Bose headphones advertise
-let bmapServiceUUID: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0xde, 0xca, 0xfa, 0xde, 0xde, 0xca, 0xde, 0xaf, 0xde, 0xca, 0xca, 0xff]
 let bmapChannel: BluetoothRFCOMMChannelID = 2
 
 // BMAP operators and the DeviceManagement [4.x] functions this app uses
@@ -11,11 +9,19 @@ let deviceManagement: UInt8 = 4, connect: UInt8 = 1, disconnect: UInt8 = 2, list
 
 struct Packet {
     let function: UInt8
-    let op: UInt8
+    let operation: UInt8
     let payload: [UInt8]
 
     // The device a reply is about, since error replies put a one-byte code in front of the address
-    var address: [UInt8] { Array((op == failed ? payload.dropFirst() : payload[...]).prefix(6)) }
+    var address: [UInt8] { Array(payload.dropFirst(operation == failed ? 1 : 0).prefix(6)) }
+
+    // Info reply: address, state bits, 2 unknown bytes, then the name
+    var device: PairedDevice? {
+        guard operation == status, payload.count >= 9 else { return nil }
+        let state = payload[6]
+        let name = String(decoding: payload[9...], as: UTF8.self)
+        return PairedDevice(address: address, name: name, connected: state & 1 != 0, active: state & 2 != 0)
+    }
 }
 
 struct PairedDevice: Codable {
@@ -45,9 +51,9 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     // Sends a packet and waits for its reply, skipping stray packets the headphones push on their own
     @discardableResult
-    func request(_ function: UInt8, _ op: UInt8, _ payload: [UInt8] = [], timeout: TimeInterval = 5) -> Packet? {
+    func request(_ function: UInt8, _ operation: UInt8, _ payload: [UInt8] = [], timeout: TimeInterval = 5) -> Packet? {
         replies.removeAll()
-        guard write(function, op, payload) else { return nil }
+        guard write(function, operation, payload) else { return nil }
         // Replies that concern a device start with its address, which is the end of the request payload
         let address = Array(payload.suffix(6))
         return wait(timeout) { reply(function, address) }
@@ -57,13 +63,13 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     func devices(_ cached: [PairedDevice], list: Bool) -> [PairedDevice] {
         var addresses = cached.map(\.address)
         if list || addresses.isEmpty {
-            guard let reply = request(listDevices, get), reply.op == status else { return [] }
+            guard let reply = request(listDevices, get), reply.operation == status else { return [] }
             addresses = stride(from: 1, to: reply.payload.count - 5, by: 6).map { Array(reply.payload[$0 ..< $0 + 6]) }
         }
         replies.removeAll()
         guard addresses.allSatisfy({ write(deviceInfo, get, $0) }) else { return [] }
         _ = wait(3) { addresses.allSatisfy { reply(deviceInfo, $0) != nil } ? true : nil }
-        let answered = addresses.compactMap { reply(deviceInfo, $0).flatMap(device) }
+        let answered = addresses.compactMap { reply(deviceInfo, $0)?.device }
         guard !answered.isEmpty else { return [] }
         // A device that missed this round keeps its last known state instead of vanishing from the menu
         return addresses.compactMap { address in
@@ -75,7 +81,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     func waitUntilConnected(_ address: [UInt8], timeout: TimeInterval = 20) -> Bool {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while isOpen && Date() < deadline {
-            if request(deviceInfo, get, address, timeout: 1).flatMap(device)?.connected == true { return true }
+            if request(deviceInfo, get, address, timeout: 1)?.device?.connected == true { return true }
             pump(0.5)
         }
         return false
@@ -85,20 +91,12 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: seconds))
     }
 
-    // Info reply: address (6 bytes), state (bit 0 connected, bit 1 active), 2 unknown bytes, then the name
-    private func device(_ reply: Packet) -> PairedDevice? {
-        guard reply.op == status, reply.payload.count >= 9 else { return nil }
-        let state = reply.payload[6]
-        let name = String(decoding: reply.payload[9...], as: UTF8.self)
-        return PairedDevice(address: Array(reply.payload[0 ..< 6]), name: name, connected: state & 1 != 0, active: state & 2 != 0)
-    }
-
     private func reply(_ function: UInt8, _ address: [UInt8]) -> Packet? {
         replies.first { $0.function == function && $0.address.starts(with: address) }
     }
 
-    private func write(_ function: UInt8, _ op: UInt8, _ payload: [UInt8]) -> Bool {
-        var bytes = [deviceManagement, function, op, UInt8(payload.count)] + payload
+    private func write(_ function: UInt8, _ operation: UInt8, _ payload: [UInt8]) -> Bool {
+        var bytes = [deviceManagement, function, operation, UInt8(payload.count)] + payload
         return channel?.writeSync(&bytes, length: UInt16(bytes.count)) == kIOReturnSuccess
     }
 
@@ -119,10 +117,11 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     // Cuts the byte stream into packets and keeps the DeviceManagement ones
     func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!, data dataPointer: UnsafeMutableRawPointer!, length dataLength: Int) {
         unread += UnsafeRawBufferPointer(start: dataPointer, count: dataLength)
-        while unread.count >= 4 && unread.count >= 4 + Int(unread[3]) {
+        while unread.count >= 4 {
             let end = 4 + Int(unread[3])
+            guard unread.count >= end else { break }
             if unread[0] == deviceManagement {
-                replies.append(Packet(function: unread[1], op: unread[2] & 0x0F, payload: Array(unread[4 ..< end])))
+                replies.append(Packet(function: unread[1], operation: unread[2] & 0x0F, payload: Array(unread[4 ..< end])))
             }
             unread.removeFirst(end)
         }
@@ -143,13 +142,6 @@ func findHeadphones() -> IOBluetoothDevice? {
     guard !address.isEmpty else { return nil }
     UserDefaults.standard.set(address, forKey: "headphones")
     return IOBluetoothDevice(addressString: address)
-}
-
-// Prints the address of the first paired device that offers the BMAP service
-func scan() {
-    let uuid = IOBluetoothSDPUUID(bytes: bmapServiceUUID, length: bmapServiceUUID.count)
-    let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
-    print(paired.first { $0.getServiceRecord(for: uuid) != nil }?.addressString ?? "")
 }
 
 // This Mac's Bluetooth address as bytes, from a string like "00:11:22:33:44:55"
@@ -232,9 +224,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Reads live states only when the headphones already talk to this Mac, so a refresh never bumps a device
     func refresh(_ cached: [PairedDevice], list: Bool) {
-        let connected = findHeadphones()?.isConnected() ?? false
+        let headphones = findHeadphones()
+        let connected = headphones?.isConnected() ?? false
         var fresh: [PairedDevice] = []
-        if connected, let headphones = findHeadphones(), let link = openLink(headphones) {
+        if connected, let headphones, let link = openLink(headphones) {
             fresh = link.devices(cached, list: list)
         }
         DispatchQueue.main.async {
@@ -332,20 +325,23 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if disconnecting {
             return confirmed(link.request(disconnect, start, target.address))
         }
-        guard confirmed(link.request(connect, start, [0] + target.address)) else { return false }
-        return link.waitUntilConnected(target.address)
+        return confirmed(link.request(connect, start, [0] + target.address)) && link.waitUntilConnected(target.address)
     }
 
     // The headphones refuse some requests, for example a phone they can't reach right now
     func confirmed(_ reply: Packet?) -> Bool {
         guard let reply else { return false }
-        if reply.op == failed { DispatchQueue.main.async { NSSound.beep() } }
-        return reply.op != failed
+        if reply.operation == failed { DispatchQueue.main.async { NSSound.beep() } }
+        return reply.operation != failed
     }
 }
 
+// Child process mode: prints the address of the first paired device that offers Bose's BMAP service
 if CommandLine.arguments.contains("--scan") {
-    scan()
+    let serviceUUID: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0xde, 0xca, 0xfa, 0xde, 0xde, 0xca, 0xde, 0xaf, 0xde, 0xca, 0xca, 0xff]
+    let uuid = IOBluetoothSDPUUID(bytes: serviceUUID, length: serviceUUID.count)
+    let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
+    print(paired.first { $0.getServiceRecord(for: uuid) != nil }?.addressString ?? "")
     exit(0)
 }
 
