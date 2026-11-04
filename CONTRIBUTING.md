@@ -12,6 +12,8 @@ bash Tests/check.sh
 
 Add a focused check when changing behavior. Use fake devices and channels in automated tests; never let a test connect to real hardware. Use generic names such as “Phone” and “Computer” in fixtures.
 
-Bluetooth and UI changes also need a manual check with your own hardware. Use `./build.sh` to install after quitting the app. Check light and dark appearance, connection progress, errors, and the disconnected state. Test only devices you control, and restore their connections afterwards. Run one Bluetooth control client at a time.
+Bluetooth and UI changes also need a manual check with your own hardware. Quit the app, then use `./build.sh` to install. Allow Bluetooth access again after each rebuild. Check light and dark appearance, connection progress, errors, and the disconnected state. Check that a second icon click or any outside click closes the panel. On macOS 27, Escape does not reach the panel when you open it with the mouse.
+
+Test only devices you control, and restore their connections afterwards. Run one Bluetooth control client at a time. Use mock images with generic names or hidden names in documentation.
 
 State what you tested in the pull request, including anything you could not verify. Keep Swift methods short and explain protocol quirks where they affect the code.

@@ -1,10 +1,10 @@
 # Bose Switcher
 
-A macOS menu bar app for Bose QuietComfort Ultra Headphones (2nd Gen). Connect or disconnect paired devices, see what is playing, and check the battery.
+A macOS menu bar app for Bose QuietComfort Ultra Headphones (2nd Gen). Connect or disconnect paired devices, see which device is playing, and check the headphone battery.
 
 ![Bose Switcher panel showing battery and connection states](docs/panel.png)
 
-Device names are blurred for privacy.
+Mock panel with device names blurred for privacy.
 
 ## Requirements
 
@@ -44,7 +44,9 @@ No third-party packages or app account are needed.
    open "$HOME/Applications/Bose Switcher.app"
    ```
 
-The script builds for your Mac, applies a local ad-hoc signature, and replaces the app in `~/Applications`. It needs no `sudo` or paid Apple developer account. The app has no Dock icon.
+The script builds for your Mac, applies an ad hoc signature, and replaces the app in `~/Applications`. It needs no `sudo` or paid Apple developer account. The app has no Dock icon.
+
+Each rebuild signs the app again, so macOS asks for Bluetooth access again when you open it.
 
 The app is not notarized by Apple. Downloaded ZIPs can carry a quarantine flag. If Gatekeeper blocks the app because Apple cannot verify it, try opening it once, then choose **System Settings → Privacy & Security → Open Anyway**. Only do this for source you trust. See [Apple's guide](https://support.apple.com/102445).
 
@@ -62,7 +64,7 @@ Open **System Settings → General → Login Items & Extensions** (**Login Items
 
 ## Update
 
-Quit the app, download and extract the latest source (or run `git pull --ff-only` in your clone), then repeat install steps 4 and 5. Your saved devices stay in place. There is no automatic updater.
+Quit the app, download and extract the latest source (or run `git pull --ff-only` in your clone), then repeat install steps 4 and 5. Allow Bluetooth access again after rebuilding. Your saved devices stay in place. There is no automatic updater.
 
 ## Uninstall
 
@@ -78,7 +80,7 @@ If Terminal says the domain was not found, there were no saved settings. This do
 
 ## How it works
 
-The app uses Bose's private BMAP protocol over Bluetooth RFCOMM channel 2. It checks connection states every two seconds while the panel is open. Device names and addresses stay in local app preferences; there is no cloud service or telemetry.
+The app uses Bose's private BMAP protocol over Bluetooth RFCOMM channel 2. It requests a state refresh every two seconds while the panel is open and no switch is running. Slow replies can delay updates. Device names and addresses are saved in local app preferences; there is no cloud service or telemetry.
 
 When the Mac is disconnected, the panel shows saved devices without live states or battery. Clicking a row can connect the Mac to send the command. The app then tries to release that temporary connection, unless you chose to connect this Mac.
 
@@ -87,7 +89,7 @@ When the Mac is disconnected, the panel shows saved devices without live states 
 - The headphones allow [two active connections](https://support.bose.com/article/quietcomfort-ultra-headphones-2nd-gen-connecting-a-bluetooth-device). Connecting a third can drop another device, including when the Mac connects temporarily.
 - Switching can take several seconds or time out. Wear the headphones when connecting devices; they may refuse connections while off-head.
 - Firmware changes may break the undocumented protocol.
-- The app remembers the first paired headphones it finds with a BMAP service. There is no headphone picker.
+- The app remembers the first paired headphones it finds with a BMAP service and keeps using them until you unpair them. There is no headphone picker.
 - Only one app can use the control channel at a time. Quit Bose Switcher before using `bosectl`.
 
 ## Troubleshooting
@@ -95,7 +97,7 @@ When the Mac is disconnected, the panel shows saved devices without live states 
 | Problem | What to try |
 | --- | --- |
 | Build fails | Check `xcrun --sdk macosx --show-sdk-version`. Install or select build tools with the macOS 27 SDK or later. |
-| Bluetooth access is blocked | Enable the app under **Privacy & Security → Bluetooth**. After an update, macOS may ask again. |
+| Bluetooth access is blocked | Click the message in the panel, or enable the app under **Privacy & Security → Bluetooth**. Each rebuild signs the app again, so macOS asks for access again. |
 | No devices appear | Pair and connect the headphones to this Mac in Bluetooth settings, then reopen the panel. |
 | “Not connected to this Mac” | Connect the Mac in Bluetooth settings to restore live states and battery. Cached rows can still send commands. |
 | “Couldn't connect” or “No answer” | Check that the target is nearby, Bluetooth is on, and the headphones are worn. Quit other BMAP clients before trying again. |

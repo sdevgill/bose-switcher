@@ -80,7 +80,7 @@ struct CoordinatorTests {
         precondition(!app.panelShown && app.placementTimer == nil)
     }
 
-    // Test that Escape and another app activating both close the panel, but the front app reactivating does not
+    // Test that cancelling the panel and another app activating both close it, but the front app reactivating does not
     static func testPanelDismissal() {
         let app = App(makeStatusItem: { NSStatusItem() })
         app.panel.delegate = app
