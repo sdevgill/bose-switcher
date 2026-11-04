@@ -1,6 +1,8 @@
 # Contributing
 
-Keep changes focused. For a bug report, include the macOS version, headphone model and firmware, steps to reproduce, and what you expected to happen. Remove personal names, device names, Bluetooth addresses, and local paths from logs and screenshots.
+Keep changes focused. Follow the [README](README.md#install-from-source) to set up the build tools. No package manager or Xcode project is needed.
+
+For a bug report, include the macOS version, headphone model and firmware, steps to reproduce, and the expected and actual result. For build failures, include `swift --version`, `xcrun --sdk macosx --show-sdk-version`, and the error. Remove personal names, device names, Bluetooth addresses, emails, hostnames, and local paths from logs and screenshots.
 
 Run the checks before submitting a change:
 

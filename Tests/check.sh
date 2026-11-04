@@ -12,4 +12,6 @@ sed -e 's/private //g' -e '/^@main$/d' main.swift > "$build_folder/Coordinator.s
 swiftc -parse-as-library -target "$(uname -m)-apple-macosx27.0" -module-cache-path "$build_folder/cache" -o "$build_folder/coordinator-checks" Bluetooth.swift DeviceState.swift PanelPlacement.swift Panel.swift "$build_folder/Coordinator.swift" Tests/CoordinatorTests.swift
 "$build_folder/coordinator-checks"
 plutil -lint Info.plist
+icon_name=$(plutil -extract CFBundleIconFile raw -o - Info.plist)
+iconutil -c iconset "icon/${icon_name%.icns}.icns" -o "$build_folder/AppIcon.iconset"
 bash -n build.sh

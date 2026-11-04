@@ -10,3 +10,5 @@ DerivedData/
 *.swiftsourceinfo
 xcuserdata/
 *.xcuserstate
+# Keep app artwork when a global Icon rule matches this folder
+!/icon/

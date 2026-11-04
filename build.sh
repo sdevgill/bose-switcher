@@ -9,8 +9,9 @@ cache=$(mktemp -d "$(dirname "$app")/.bose-build.XXXXXX")
 trap 'rm -rf "$cache"' EXIT
 staged="$cache/Bose Switcher.app"
 
-mkdir -p "$staged/Contents/MacOS"
+mkdir -p "$staged/Contents/MacOS" "$staged/Contents/Resources"
 cp Info.plist "$staged/Contents/"
+cp icon/AppIcon.icns "$staged/Contents/Resources/"
 swiftc -O -parse-as-library -target "$(uname -m)-apple-macosx27.0" -module-cache-path "$cache/modules" -o "$staged/Contents/MacOS/BoseSwitcher" *.swift
 codesign --force --sign - "$staged"
 codesign --verify --strict "$staged"

@@ -3,7 +3,7 @@ import SwiftUI
 import IOBluetooth
 import CoreBluetooth
 
-final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject, CBCentralManagerDelegate {
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItemExpandedInterfaceDelegate, ObservableObject, CBCentralManagerDelegate {
     private(set) var state = DeviceState()
     @Published var actions: [[UInt8]: RowAction] = [:]
     @Published var macConnected = false
@@ -17,7 +17,6 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     private let makeStatusItem: () -> NSStatusItem
     private let hostAddress: () -> [UInt8]
     private let discoverHeadphones: (() -> Bool) -> IOBluetoothDevice?
-    private let statusLabel = StatusLabel()
     private let panel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var panelTopLeft = NSPoint.zero
     private var placementTimer: Timer?
@@ -62,11 +61,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
             state.devices = saved
         }
         if let button = statusItem.button {
-            statusLabel.frame = button.bounds.insetBy(dx: -1, dy: -1)
-            statusLabel.autoresizingMask = [.width, .height]
-            button.addSubview(statusLabel)
+            button.image = switcherIcon()
             button.setAccessibilityLabel("Bose Switcher")
         }
+        statusItem.expandedInterfaceDelegate = self
+        // AXPress still uses target/action instead of starting a native session
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
         statusItem.button?.toolTip = "Bose Switcher"
@@ -94,15 +93,33 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     }
 
     @objc private func togglePanel() {
+        if let session = statusItem.expandedInterfaceSession { session.cancel(); return }
         if placementTimer != nil && !panelShown { placementTimer?.invalidate(); placementTimer = nil; return }
         if panelShown { hidePanel(); return }
+        openPanel()
+    }
+
+    func statusItem(_ statusItem: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
+        openPanel()
+    }
+
+    func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
+        hidePanel()
+    }
+
+    private func openPanel() {
+        guard !panelShown, placementTimer == nil else { return }
         if positionPanel() { presentPanel() }
         // Accessibility can expose the status item before its window is positioned
         let deadline = Date(timeIntervalSinceNow: 2)
         placementTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             if self.positionPanel(), !self.panelShown { self.presentPanel() }
-            if Date() >= deadline { timer.invalidate(); self.placementTimer = nil }
+            if Date() >= deadline {
+                timer.invalidate()
+                self.placementTimer = nil
+                if !self.panelShown { self.statusItem.expandedInterfaceSession?.cancel() }
+            }
         }
     }
 
@@ -124,7 +141,6 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         panel.orderFrontRegardless()
         panel.invalidateShadow()
         statusItem.button?.toolTip = nil
-        statusLabel.selected = true
         showPanel()
     }
 
@@ -232,10 +248,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     func hidePanel() {
         placementTimer?.invalidate()
         placementTimer = nil
+        // AppKit clears the session before sending its dismissal callback
+        statusItem.expandedInterfaceSession?.cancel()
         guard panelShown else { return }
         panelShown = false
         panel.orderOut(nil)
-        statusLabel.selected = false
         statusItem.button?.toolTip = "Bose Switcher"
         panelTimer?.invalidate()
         panelTimer = nil

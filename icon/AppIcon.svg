@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Headphones with two-way switch arrows</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#9bcae0"/>
+      <stop offset="0.5" stop-color="#528ba9"/>
+      <stop offset="1" stop-color="#285772"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0.6" y2="1">
+      <stop stop-color="#ffffff" stop-opacity="0.85"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.3"/>
+    </linearGradient>
+    <linearGradient id="porcelain" x1="0" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#ffffff"/>
+      <stop offset="0.55" stop-color="#f0f5f7"/>
+      <stop offset="1" stop-color="#bdced8"/>
+    </linearGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="0.6" y2="1">
+      <stop stop-color="#344f64"/>
+      <stop offset="1" stop-color="#152c40"/>
+    </linearGradient>
+  </defs>
+  <!-- The transparent margin matches the macOS icon grid -->
+  <rect x="100" y="110" width="824" height="824" rx="184" fill="#122b40" opacity="0.16"/>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#tile)"/>
+  <rect x="103" y="103" width="818" height="818" rx="181" fill="none" stroke="url(#rim)" stroke-width="6"/>
+  <!-- A continuous headband and solid ear cushions remain legible at small sizes -->
+  <path d="M298 568V478a214 214 0 0 1 428 0v90" fill="none" stroke="#17394f" stroke-opacity="0.18" stroke-width="66" stroke-linecap="round" transform="translate(0 14)"/>
+  <path d="M298 552V468a214 214 0 0 1 428 0v84" fill="none" stroke="url(#porcelain)" stroke-width="58" stroke-linecap="round"/>
+  <path d="M298 464a214 214 0 0 1 428 0" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="8" stroke-linecap="round"/>
+  <rect x="246" y="490" width="114" height="218" rx="49" fill="#17394f" opacity="0.18" transform="translate(0 12)"/>
+  <rect x="246" y="490" width="114" height="218" rx="49" fill="url(#porcelain)"/>
+  <rect x="664" y="490" width="114" height="218" rx="49" fill="url(#porcelain)"/>
+  <path d="M271 538v119M689 538v119" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="7" stroke-linecap="round"/>
+  <!-- The offset badge echoes the menu bar template -->
+  <circle cx="691" cy="704" r="151" fill="#193d53" opacity="0.24"/>
+  <circle cx="691" cy="692" r="148" fill="url(#badge)" stroke="url(#rim)" stroke-width="4"/>
+  <g fill="none" stroke="#f5faff" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M766 657H616l34-34M616 657l34 34"/>
+    <path d="M616 727h150l-34-34M766 727l-34 34"/>
+  </g>
+</svg>
