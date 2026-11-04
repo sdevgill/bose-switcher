@@ -82,10 +82,10 @@ struct BehaviorTests {
         for cancel in [false, true] {
             let child = Process()
             child.arguments = ["--scan-stall"]
-            let began = Date()
+            let began = monotonicNow()
             precondition(scanHeadphones(timeout: cancel ? 3 : 0.1,
-                                       cancelled: { cancel && Date().timeIntervalSince(began) > 0.1 }, scan: child) == nil)
-            precondition(Date().timeIntervalSince(began) < 0.5)
+                                       cancelled: { cancel && monotonicNow().timeIntervalSince(began) > 0.1 }, scan: child) == nil)
+            precondition(monotonicNow().timeIntervalSince(began) < 0.5)
             child.waitUntilExit()
             precondition(child.terminationReason == .uncaughtSignal && child.terminationStatus == SIGKILL)
         }
@@ -121,15 +121,15 @@ struct BehaviorTests {
         for operation in 0..<4 {
             let channel = FakeChannel()
             let link = BmapLink(channel: channel)
-            let began = Date()
-            let cancelled = { Date().timeIntervalSince(began) > 0.05 }
+            let began = monotonicNow()
+            let cancelled = { monotonicNow().timeIntervalSince(began) > 0.05 }
             switch operation {
             case 0: precondition(link.readDevice(phone, cancelled: cancelled) == nil)
             case 1: precondition(link.request(connect, start, [0] + phone, yielding: cancelled) == nil)
             case 2: precondition(link.disconnectHost(computer, cancelled: cancelled, isConnected: { true }) == .timeout)
             default: precondition(link.waitUntilConnected(phone, since: began, cancelled: cancelled) == .timeout)
             }
-            precondition(Date().timeIntervalSince(began) < 0.3 && !link.isOpen)
+            precondition(monotonicNow().timeIntervalSince(began) < 0.3 && !link.isOpen)
         }
     }
 
@@ -174,7 +174,7 @@ struct BehaviorTests {
                 channel.reply(deviceInfo, status, phone + [1, 0, 0] + Array("Phone".utf8), after: 2.1)
             }
         }
-        precondition(link.waitUntilConnected(phone, since: Date(), timeout: 2.5) == .confirmed)
+        precondition(link.waitUntilConnected(phone, since: monotonicNow(), timeout: 2.5) == .confirmed)
         precondition(channel.writes.count == 1)
     }
 
@@ -210,7 +210,7 @@ struct BehaviorTests {
         replacement.onWrite = { bytes in
             if bytes[1] == deviceInfo { replacement.reply(deviceInfo, status, phone + [1, 0, 0] + Array("Phone".utf8)) }
         }
-        let began = Date()
+        let began = monotonicNow()
         var reopenCount = 0
         let result = first.waitUntilConnected(phone, since: began, timeout: 3, reopen: {
             precondition(!first.isOpen)
@@ -218,15 +218,15 @@ struct BehaviorTests {
             return second
         })
         precondition(result == .confirmed && reopenCount == 1)
-        precondition(Date().timeIntervalSince(began) < 1.3)
+        precondition(monotonicNow().timeIntervalSince(began) < 1.3)
         precondition((lost.writes + replacement.writes).filter { $0[1] == connect }.count == 1)
-        print("Lost connection poll recovered seconds", Date().timeIntervalSince(began))
+        print("Lost connection poll recovered seconds", monotonicNow().timeIntervalSince(began))
     }
 
     // Test that connection readings expire
     static func testReadingExpiry() {
         var state = DeviceState()
-        let began = Date()
+        let began = monotonicNow()
         state.merge(DeviceReading(device: PairedDevice(address: phone, name: "Phone", connected: true), requestedAt: began))
         precondition(state.isFresh(phone, at: began.addingTimeInterval(4)))
         precondition(!state.isFresh(phone, at: began.addingTimeInterval(6)))
@@ -254,7 +254,7 @@ struct BehaviorTests {
         let television: [UInt8] = [0, 1, 2, 3, 4, 5]
         state.reconcileOrder([phone, computer, television], computer: computer)
         for device in [PairedDevice(address: television, name: "TV"), PairedDevice(address: phone, name: "Phone"), PairedDevice(address: computer, name: "Computer")] {
-            state.merge(DeviceReading(device: device, requestedAt: Date()))
+            state.merge(DeviceReading(device: device, requestedAt: monotonicNow()))
         }
         let previous = state.devices
         state.reconcileOrder([television, phone, computer], computer: computer)
@@ -312,7 +312,7 @@ struct BehaviorTests {
         var state = DeviceState()
         state.devices = [PairedDevice(address: computer, name: "MacBook", connected: true)]
         state.reorder([phone, computer])
-        state.merge(DeviceReading(device: PairedDevice(address: phone, name: "iPhone"), requestedAt: Date()))
+        state.merge(DeviceReading(device: PairedDevice(address: phone, name: "iPhone"), requestedAt: monotonicNow()))
         precondition(state.devices.map(\.address) == [phone, computer])
         precondition(state.devices[1].connected)
         precondition(state.devices.map(\.symbol) == ["iphone", "laptopcomputer"])
@@ -386,7 +386,7 @@ struct BehaviorTests {
     static func testFirstConfirmationAndFreshness() {
         var state = DeviceState()
         state.devices = [PairedDevice(address: phone, name: "Phone", connected: true, active: true)]
-        let date = Date()
+        let date = monotonicNow()
         state.confirm(computer, connected: true, at: date)
         precondition(!state.isFresh(phone))
         state.merge(DeviceReading(device: PairedDevice(address: computer, name: "Computer"), requestedAt: date.addingTimeInterval(0.1)))
@@ -401,7 +401,7 @@ struct BehaviorTests {
         state.devices = [PairedDevice(address: phone, name: "Phone", connected: true)]
         state.reorder([computer])
         precondition(state.devices.isEmpty && state.knownAddresses == [computer])
-        state.merge(DeviceReading(device: PairedDevice(address: phone, name: "Phone"), requestedAt: Date()))
+        state.merge(DeviceReading(device: PairedDevice(address: phone, name: "Phone"), requestedAt: monotonicNow()))
         precondition(state.devices.isEmpty)
     }
 
@@ -419,9 +419,9 @@ struct BehaviorTests {
                     channel.reply(deviceInfo, status, phone + [1, 0, 0] + Array("Phone".utf8))
                 }
             }
-            let began = Date()
+            let began = monotonicNow()
             _ = link.refresh([phone], list: false, yielding: { false })
-            let elapsed = Date().timeIntervalSince(began)
+            let elapsed = monotonicNow().timeIntervalSince(began)
             precondition(link.isOpen && elapsed < 0.15)
             print("Recovered refresh seconds", elapsed)
         }
@@ -444,15 +444,15 @@ struct BehaviorTests {
     static func testConnectionPolling() {
         let channel = FakeChannel()
         let link = BmapLink(channel: channel)
-        let began = Date()
+        let began = monotonicNow()
         channel.onWrite = { bytes in
             if bytes[1] == deviceInfo {
-                let connected: UInt8 = Date().timeIntervalSince(began) >= 0.05 ? 1 : 0
+                let connected: UInt8 = monotonicNow().timeIntervalSince(began) >= 0.05 ? 1 : 0
                 channel.reply(deviceInfo, status, phone + [connected, 0, 0] + Array("Phone".utf8))
             }
         }
         precondition(link.waitUntilConnected(phone, since: began, timeout: 1) == .confirmed)
-        let elapsed = Date().timeIntervalSince(began)
+        let elapsed = monotonicNow().timeIntervalSince(began)
         precondition(elapsed < 0.3)
         print("Connection confirmation seconds", elapsed)
     }

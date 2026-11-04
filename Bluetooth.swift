@@ -10,6 +10,9 @@ let deviceManagement: UInt8 = 4, connect: UInt8 = 1, disconnect: UInt8 = 2, list
 // Deadlines use the monotonic clock so a system clock change cannot stretch a wait
 func uptime() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
 
+// Timestamps for readings and refresh scheduling, on the same monotonic clock
+func monotonicNow() -> Date { Date(timeIntervalSinceReferenceDate: uptime()) }
+
 struct Packet {
     let block: UInt8
     let function: UInt8
@@ -123,7 +126,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     func readDevice(_ address: [UInt8], cancelled: () -> Bool = { false }) -> PairedDevice? {
-        let began = Date()
+        let began = monotonicNow()
         requestInfo(address)
         let reading: PairedDevice? = wait(3, yielding: cancelled) {
             guard let reading = self.readings[address], reading.requestedAt >= began else { return nil }
@@ -146,7 +149,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         }
         defer { if !infoRequests.isEmpty { close() } }
         guard !yielding() else { return nil }
-        let began = Date()
+        let began = monotonicNow()
         for address in addresses {
             guard !yielding() else { return nil }
             requestInfo(address)
@@ -170,7 +173,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
                 guard let replacement = reopen(), replacement.isOpen else { return .timeout }
                 observer = replacement
             }
-            let requestedAt = Date()
+            let requestedAt = monotonicNow()
             observer.requestInfo(address)
             let answered: Bool? = observer.wait(min(observer.receivedPacket ? 1 : 3, deadline - uptime()), yielding: cancelled) {
                 if observer.connectionResult(address, since: began) != nil { return true }
@@ -199,7 +202,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     private func requestInfo(_ address: [UInt8]) {
         guard infoRequests[address] == nil else { return }
-        infoRequests[address] = Date()
+        infoRequests[address] = monotonicNow()
         if !write(deviceInfo, get, address) { close() }
     }
 

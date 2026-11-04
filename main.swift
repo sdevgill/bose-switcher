@@ -100,7 +100,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
 
     // A real click starts a session, which keeps the item highlighted while the panel is open
     func statusItem(_ statusItem: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
-        if Date() < ignoreSessionUntil { session.cancel(); return }
+        if monotonicNow() < ignoreSessionUntil { session.cancel(); return }
         openPanel()
     }
 
@@ -117,12 +117,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         guard !panelShown, placementTimer == nil else { return }
         if positionPanel() { presentPanel() }
         // Accessibility can expose the status item before its window is positioned
-        let deadline = Date(timeIntervalSinceNow: 2)
+        let deadline = monotonicNow().addingTimeInterval(2)
         placementTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             // The item can settle a moment after the panel opens, so keep following it until the deadline
             if self.positionPanel(), !self.panelShown { self.presentPanel() }
-            if Date() >= deadline {
+            if monotonicNow() >= deadline {
                 timer.invalidate()
                 self.placementTimer = nil
                 if !self.panelShown { self.hidePanel() }
@@ -154,7 +154,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             guard let self else { return }
             // Without a session, a click on the item would start one and reopen the panel
-            if self.statusItem.expandedInterfaceSession == nil { self.ignoreSessionUntil = Date(timeIntervalSinceNow: 0.5) }
+            if self.statusItem.expandedInterfaceSession == nil { self.ignoreSessionUntil = monotonicNow().addingTimeInterval(0.5) }
             self.hidePanel()
         }
         showPanel()
@@ -292,7 +292,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
     }
 
     private var shouldRefreshList: Bool {
-        Date() >= nextListAttempt && (listNeeded || Date().timeIntervalSince(lastList) >= 60)
+        monotonicNow() >= nextListAttempt && (listNeeded || monotonicNow().timeIntervalSince(lastList) >= 60)
     }
 
     // Read cached devices first, then discover new pairings at idle priority
@@ -306,7 +306,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         refreshPending = true
         refreshingList = list
         let generation = session.current
-        if list { nextListAttempt = Date(timeIntervalSinceNow: 5) }
+        if list { nextListAttempt = monotonicNow().addingTimeInterval(5) }
         let known = state.knownAddresses
         bluetooth.async {
             guard self.session.accepts(generation) else { return }
@@ -327,10 +327,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
                 guard self.session.accepts(generation) else { return }
                 if discovered != nil {
                     self.listNeeded = false
-                    self.lastList = Date()
+                    self.lastList = monotonicNow()
                     self.listFailed = false
                 } else if list {
-                    self.nextListAttempt = Date(timeIntervalSinceNow: 5)
+                    self.nextListAttempt = monotonicNow().addingTimeInterval(5)
                     self.listFailed = connected
                 }
                 self.refreshPending = false
@@ -522,7 +522,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             finish(target, disconnecting: true, result: result, generation: generation)
             return
         }
-        let began = Date()
+        let began = monotonicNow()
         let switchDeadline = uptime() + 20
         let reply = disconnecting
             ? link.request(disconnect, start, target.address, yielding: { !self.session.accepts(generation) })

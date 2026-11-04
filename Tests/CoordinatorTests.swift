@@ -122,7 +122,7 @@ struct CoordinatorTests {
         app.showPanel()
         app.hidePanel()
         precondition(cancellations == 1 && !app.panelShown && item.activeSession == nil && app.placementTimer == nil)
-        app.ignoreSessionUntil = Date(timeIntervalSinceNow: 0.5)
+        app.ignoreSessionUntil = monotonicNow().addingTimeInterval(0.5)
         _ = begin()
         precondition(cancellations == 2 && app.placementTimer == nil && !app.panelShown)
     }
@@ -196,10 +196,10 @@ struct CoordinatorTests {
         app.bluetooth.async { started.signal(); resume.wait() }
         precondition(started.wait(timeout: .now() + 1) == .success)
         var replies = 0
-        let began = Date()
+        let began = monotonicNow()
         app.beginTermination { replies += 1 }
-        while replies == 0 && Date().timeIntervalSince(began) < 1.8 { settle(0.01) }
-        precondition(replies == 1 && Date().timeIntervalSince(began) < 1.7)
+        while replies == 0 && monotonicNow().timeIntervalSince(began) < 1.8 { settle(0.01) }
+        precondition(replies == 1 && monotonicNow().timeIntervalSince(began) < 1.7)
         resume.signal()
         settle()
         precondition(replies == 1)
@@ -216,11 +216,11 @@ struct CoordinatorTests {
         app.requestRefresh(list: true)
         settle()
         precondition(!app.refreshPending && app.lastList == .distantPast)
-        precondition(!app.shouldRefreshList && app.nextListAttempt > Date())
+        precondition(!app.shouldRefreshList && app.nextListAttempt > monotonicNow())
         app.nextListAttempt = .distantPast
         precondition(app.shouldRefreshList)
         app.listNeeded = false
-        app.lastList = Date()
+        app.lastList = monotonicNow()
         precondition(!app.shouldRefreshList)
     }
 
@@ -270,7 +270,7 @@ struct CoordinatorTests {
         let address: [UInt8] = [1, 2, 3, 4, 5, 6]
         app.updateState {
             $0.devices = [PairedDevice(address: address, name: "Phone")]
-            $0.confirm(address, connected: true, at: Date(timeIntervalSinceNow: -4.9))
+            $0.confirm(address, connected: true, at: monotonicNow().addingTimeInterval(-4.9))
         }
         var notifications = 0
         let subscription = app.objectWillChange.sink { notifications += 1 }
@@ -285,7 +285,7 @@ struct CoordinatorTests {
     // Test that closing the panel preserves a confirmation until it expires
     static func testQuickReopen(_ app: App) {
         let address: [UInt8] = [1, 2, 3, 4, 5, 6]
-        let began = Date()
+        let began = monotonicNow()
         app.updateState {
             $0.devices = [PairedDevice(address: address, name: "Phone")]
             $0.confirm(address, connected: true, at: began)

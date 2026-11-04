@@ -61,7 +61,7 @@ struct DeviceState {
     private var fresh: Set<[UInt8]> = []
 
     var knownAddresses: [[UInt8]] { membershipKnown ? order : devices.map(\.address) }
-    func isFresh(_ address: [UInt8], at date: Date = Date()) -> Bool {
+    func isFresh(_ address: [UInt8], at date: Date = monotonicNow()) -> Bool {
         fresh.contains(address) && date.timeIntervalSince(updatedAt[address] ?? .distantPast) < 5
     }
 
@@ -104,7 +104,7 @@ struct DeviceState {
     }
 
     // Info can lag a command by two seconds, even when requested after confirmation
-    mutating func confirm(_ address: [UInt8], connected: Bool, at date: Date = Date()) {
+    mutating func confirm(_ address: [UInt8], connected: Bool, at date: Date = monotonicNow()) {
         if let index = devices.firstIndex(where: { $0.address == address }) {
             devices[index].connected = connected
             if !connected || !fresh.contains(address) { devices[index].active = false }
