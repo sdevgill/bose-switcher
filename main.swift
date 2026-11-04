@@ -93,7 +93,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         if placementTimer != nil && !panelShown { placementTimer?.invalidate(); placementTimer = nil; return }
         if panelShown { hidePanel(); return }
         if positionPanel() { presentPanel() }
-        // The status item can be accessible before its window has its final screen position
+        // Accessibility can expose the status item before its window is positioned
         let deadline = Date(timeIntervalSinceNow: 2)
         placementTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
@@ -204,7 +204,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         panelTimer = nil
     }
 
-    // A cached launch starts with Info, then discovers new pairings at idle priority
+    // Read cached devices first, then discover new pairings at idle priority
     private func requestRefresh(list: Bool = false) {
         guard bluetoothStatus == nil, session.accepts(session.current) else { return }
         guard !refreshPending else {
@@ -284,7 +284,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         return link
     }
 
-    // Mac connectivity does not depend on whether any Info requests answered
+    // Track the Mac connection even when Info requests fail
     private func publishConnection(_ headphones: IOBluetoothDevice?, connected: Bool, generation: Int) {
         let name = headphones?.name
         let address = hostAddress()
@@ -454,7 +454,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
             self.actionPending = false
             self.clearFeedback(target.address)
             self.requestRefresh(list: self.state.devices.isEmpty)
-            // Wait out the measured Info lag without occupying the Bluetooth thread
+            // Refresh after the firmware's Info lag without blocking Bluetooth
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 self.requestRefresh(list: self.state.devices.isEmpty)
             }
@@ -505,7 +505,7 @@ struct BoseSwitcher {
             print(paired.first { $0.getServiceRecord(for: uuid) != nil }?.addressString ?? "")
             return
         }
-        // Match the reference's antialiased text without changing the system preference
+        // Disable font smoothing for this app only
         UserDefaults.standard.set(0, forKey: "AppleFontSmoothing")
         let application = NSApplication.shared
         let delegate = App()

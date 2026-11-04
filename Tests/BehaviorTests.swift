@@ -80,7 +80,7 @@ struct BehaviorTests {
         precondition(rectangle.contains(CGPoint(x: 50, y: 100)))
     }
 
-    // Test that forgetting a cached pair discovers its replacement but an offline pair stays selected
+    // Test that discovery replaces a forgotten pair but keeps an offline pair
     static func testReplacementDiscovery() {
         let suite = "headphone-discovery-test-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
@@ -98,7 +98,7 @@ struct BehaviorTests {
         precondition(findHeadphones(defaults: defaults, lookup: lookup, scan: scan) === replacement && scans == 1)
     }
 
-    // Test that a replacement channel allows the measured first-reply handshake delay
+    // Test that a new channel allows time for its first reply
     static func testColdConnectionPoll() {
         let channel = FakeChannel()
         let link = BmapLink(channel: channel)
@@ -156,7 +156,7 @@ struct BehaviorTests {
         print("Lost connection poll recovered seconds", Date().timeIntervalSince(began))
     }
 
-    // Test that a closed-panel observation gap cannot authenticate an old connection flag
+    // Test that connection readings expire
     static func testReadingExpiry() {
         var state = DeviceState()
         let began = Date()
@@ -285,7 +285,7 @@ struct BehaviorTests {
         precondition(thread.isFinished)
     }
 
-    // Test that a confirmation survives the first lagging reading without authenticating cached peers
+    // Test that a confirmed connection survives lag without refreshing cached peers
     static func testFirstConfirmationAndFreshness() {
         var state = DeviceState()
         state.devices = [PairedDevice(address: phone, name: "Phone", connected: true, active: true)]
@@ -343,7 +343,7 @@ struct BehaviorTests {
         precondition(second.request(connect, start, [0] + phone, timeout: 0.2)?.operation == processing)
     }
 
-    // Test that fast connection transitions finish without the old half-second polling pause
+    // Test that a connection reply completes without waiting for the next poll
     static func testConnectionPolling() {
         let channel = FakeChannel()
         let link = BmapLink(channel: channel)

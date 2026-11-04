@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 import QuartzCore
 
-// Colors from the E stills, while the surface itself uses system glass
 private enum PanelStyle {
     static let strong = color(0x212124, 0xededf0)
     static let secondary = color(0x6c6c72, 0xa1a1a6)
@@ -125,7 +124,7 @@ struct SwitcherPanel: View {
     }
 }
 
-// Draw the broad shadow outside the glass so it cannot darken the translucent content
+// Keep the shadow outside the glass to avoid darkening its content
 struct PanelShadow: View {
     var body: some View {
         Canvas { context, size in
@@ -207,7 +206,7 @@ private struct DeviceRow: View {
     }
 }
 
-// Keep progress and labels at full contrast while activation is disabled
+// Keep disabled rows readable during a switch
 private struct DeviceButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -215,7 +214,7 @@ private struct DeviceButtonStyle: ButtonStyle {
     }
 }
 
-// Core Animation rotates only the arc, with no per-frame SwiftUI layout or timers
+// Rotate the arc without triggering SwiftUI layout
 private struct ProgressRing: NSViewRepresentable {
     let animate: Bool
 
@@ -282,7 +281,7 @@ private final class RingView: NSView {
     }
 }
 
-// Template images preserve the approved vector geometry while the system supplies tint
+// Template images let the system tint the artwork
 func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
     let size = name == "battery" ? NSSize(width: 26, height: 22) : NSSize(width: 22, height: 22)
     let image = NSImage(size: size, flipped: true) { _ in
@@ -381,7 +380,7 @@ func switcherIcon() -> NSImage {
     return image
 }
 
-// A persistent selection pill survives the status button's momentary click highlight
+// Keep the status item highlighted while the panel is open
 final class StatusLabel: NSView {
     var selected = false { didSet { needsDisplay = true } }
     private let icon = NSImageView()

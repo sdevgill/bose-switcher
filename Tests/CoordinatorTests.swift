@@ -5,7 +5,7 @@ final class BorrowedHeadphones: IOBluetoothDevice {
     var connected = false
     var closes = 0
     var onOpen: (() -> Void)?
-    override var addressString: String! { "00-11-22-33-44-55" }
+    override var addressString: String! { "test-headphones" }
     override var name: String! { "Headphones" }
     override func isConnected() -> Bool { connected }
     override func openConnection() -> IOReturn {
@@ -60,7 +60,7 @@ struct CoordinatorTests {
         settle()
     }
 
-    // Test that an expired unchanged reading publishes once so the visible row becomes unavailable
+    // Test that a reading's expiry publishes once
     static func testVisibleExpiry(_ app: App) {
         let address: [UInt8] = [1, 2, 3, 4, 5, 6]
         app.updateState {
@@ -77,7 +77,7 @@ struct CoordinatorTests {
         withExtendedLifetime(subscription) {}
     }
 
-    // Test that closing the panel preserves a recent confirmation only within its freshness window
+    // Test that closing the panel preserves a confirmation until it expires
     static func testQuickReopen(_ app: App) {
         let address: [UInt8] = [1, 2, 3, 4, 5, 6]
         let began = Date()
@@ -92,7 +92,7 @@ struct CoordinatorTests {
         precondition(!app.state.isFresh(address, at: began.addingTimeInterval(7)))
     }
 
-    // Test that the battery image visibly gains charge instead of keeping one cached full glyph
+    // Test that the battery fill grows with its charge
     static func testBatteryArtwork() {
         func coverage(_ level: Int) -> Double {
             let image = referenceSymbol("battery", battery: level)
@@ -106,7 +106,7 @@ struct CoordinatorTests {
         precondition(empty < partial && partial < full)
     }
 
-    // Test that late cleanup cannot replace a newer action or leave an error indefinitely
+    // Test that cleanup respects newer actions and clears its errors
     static func testCleanupOwnership(_ app: App) {
         let address: [UInt8] = [1, 2, 3, 4, 5, 6]
         let old = UUID()

@@ -71,7 +71,7 @@ struct DeviceState {
         reorder(stable.filter { $0 == computer } + stable.filter { $0 != computer })
     }
 
-    // Missing answers leave the current device alone, including its confirmed state
+    // Update only devices that answered and preserve recent confirmations
     mutating func merge(_ reading: DeviceReading) {
         let address = reading.device.address
         guard !membershipKnown || order.contains(address) else { return }
@@ -124,7 +124,7 @@ struct DeviceState {
     }
 }
 
-// Power and sleep boundaries cancel queued work without sharing main-thread state
+// Cancel queued work across power and sleep changes
 final class WorkSession {
     private let lock = NSLock()
     private var generation = 0

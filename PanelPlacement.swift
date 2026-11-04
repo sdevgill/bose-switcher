@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// The window includes transparent space for the shadow without moving the visible panel
+// Reserve window space for the shadow without moving the panel
 enum PanelLayout {
     static let shadowSide: CGFloat = 32
     static let shadowTop: CGFloat = 8
@@ -24,7 +24,7 @@ enum PanelLayout {
     }
 }
 
-// Reject unfinished status-item layouts instead of opening at the screen origin
+// Wait for a valid status-item position before placing the panel
 func panelOrigin(anchor: CGRect, screen: CGRect, visible: CGRect, size: CGSize) -> CGPoint? {
     let menuHeight = max(30, screen.maxY - visible.maxY)
     guard anchor.width > 0, anchor.height > 0,

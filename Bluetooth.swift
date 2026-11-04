@@ -79,7 +79,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         channel.setDelegate(self)
     }
 
-    // A fresh channel is the only unambiguous boundary when BMAP loses a reply
+    // Reopen after a lost reply because BMAP has no request IDs
     func close() {
         let previous = channel
         channel = nil
@@ -88,7 +88,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         infoRequests.removeAll()
     }
 
-    // The local host gets no reply, so confirm against the physical connection instead
+    // The Mac gets no disconnect reply, so check its physical connection
     func disconnectHost(_ address: [UInt8], timeout: TimeInterval = 3, isConnected: () -> Bool) -> ActionResult {
         let began = Date()
         let reply = request(disconnect, start, address, timeout: min(1, timeout))
@@ -99,7 +99,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     deinit { close() }
 
-    // Only retire replies for this command, leaving late Info replies alone
+    // Clear this command's replies without discarding pending Info
     @discardableResult
     func request(_ function: UInt8, _ operation: UInt8, _ payload: [UInt8] = [], timeout: TimeInterval = 5,
                  yielding: () -> Bool = { false }) -> Packet? {
@@ -128,7 +128,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         return reading
     }
 
-    // Known devices get Info together, listing pairings is separate idle work
+    // Read known devices together and discover pairings separately
     func refresh(_ known: [[UInt8]], list: Bool, yielding: () -> Bool) -> [[UInt8]]? {
         guard !yielding() else { return nil }
         var addresses = known
@@ -152,7 +152,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         return list ? addresses : nil
     }
 
-    // Check during the polling pause too, so a late connected reply finishes immediately
+    // Accept connected replies during the polling pause too
     func waitUntilConnected(_ address: [UInt8], since began: Date, timeout: TimeInterval = 20,
                             cancelled: () -> Bool = { false }, reopen: () -> BmapLink? = { nil }) -> ActionResult {
         let deadline = Date(timeIntervalSinceNow: timeout)
@@ -221,7 +221,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         onClose?()
     }
 
-    // Keep request dates with Info replies so an old refresh cannot undo a confirmation
+    // Timestamp Info requests so stale replies cannot undo a confirmed action
     func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!, data dataPointer: UnsafeMutableRawPointer!, length dataLength: Int) {
         guard rfcommChannel === channel else { return }
         unread += UnsafeRawBufferPointer(start: dataPointer, count: dataLength)
@@ -261,7 +261,7 @@ func findHeadphones(defaults: UserDefaults = .standard,
     return device
 }
 
-// pairedDevices breaks isConnected in this process, so scan in a child only
+// Isolate pairedDevices because it breaks isConnected in the calling process
 private func scanHeadphones() -> String? {
     let scan = Process()
     let output = Pipe()
@@ -281,7 +281,7 @@ func macAddress() -> [UInt8] {
     return text.split(separator: ":").compactMap { UInt8($0, radix: 16) }
 }
 
-// Jobs enter under a lock, but only the default-mode Bluetooth run loop executes them
+// Run jobs in the default run-loop mode required by IOBluetooth callbacks
 final class BluetoothThread: Thread {
     private let lock = NSLock()
     private var actions: [() -> Void] = []
