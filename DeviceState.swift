@@ -15,6 +15,13 @@ struct PairedDevice: Codable, Identifiable, Equatable {
         return name
     }
 
+    // A damaged cache must not reach the packet writer, so keep unique six-byte addresses only
+    static func cached(_ data: Data) -> [PairedDevice] {
+        let saved = (try? JSONDecoder().decode([PairedDevice].self, from: data)) ?? []
+        var seen = Set<[UInt8]>()
+        return saved.filter { $0.address.count == 6 && seen.insert($0.address).inserted }
+    }
+
     // Guess the device type from its Bluetooth name, falling back to a desktop
     var symbol: String {
         func has(_ words: String...) -> Bool { words.contains { name.localizedCaseInsensitiveContains($0) } }

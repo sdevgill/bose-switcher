@@ -49,6 +49,8 @@ struct BehaviorTests {
         testConfirmedState()
         testMissingDevicesAndOrder()
         testDeviceSymbols()
+        try! testCacheValidation()
+        testMalformedInfo()
         testActionPriority()
         testFirstConfirmationAndFreshness()
         testAuthoritativeMembership()
@@ -69,7 +71,7 @@ struct BehaviorTests {
         testScanLifetime()
         testScanActionPriority()
         testCancelledWaits()
-        print("Passed 25 hardware-free behavior checks")
+        print("Passed 27 hardware-free behavior checks")
     }
 
     // Test that successful scans return output and timed-out or cancelled children are killed
@@ -314,6 +316,28 @@ struct BehaviorTests {
         precondition(state.devices.map(\.address) == [phone, computer])
         precondition(state.devices[1].connected)
         precondition(state.devices.map(\.symbol) == ["iphone", "laptopcomputer"])
+    }
+
+    // Test that a damaged cache drops oversized and duplicate addresses
+    static func testCacheValidation() throws {
+        let devices = [PairedDevice(address: phone, name: "Phone"), PairedDevice(address: phone, name: "Copy"),
+                       PairedDevice(address: Array(repeating: 1, count: 256), name: "Broken")]
+        let cached = PairedDevice.cached(try JSONEncoder().encode(devices))
+        precondition(cached.map(\.name) == ["Phone"])
+        precondition(PairedDevice.cached(Data("garbage".utf8)).isEmpty)
+    }
+
+    // Test that a malformed Info reply cannot satisfy a request and retires the channel
+    static func testMalformedInfo() {
+        let channel = FakeChannel()
+        let link = BmapLink(channel: channel)
+        channel.onWrite = { bytes in
+            if bytes[1] == deviceInfo { channel.reply(deviceInfo, status, Array(bytes[4...])) }
+        }
+        var readings = 0
+        link.onDevice = { _ in readings += 1 }
+        _ = link.refresh([phone], list: false, yielding: { false })
+        precondition(readings == 0 && !link.isOpen)
     }
 
     // Test that common device names get a matching icon and unknown names fall back to a desktop

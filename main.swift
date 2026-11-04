@@ -12,6 +12,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
     @Published var panelShown = false
     @Published var batteryPercent: Int?
     @Published var bluetoothStatus: String? = "Loading Bluetooth…"
+    @Published var listFailed = false
     private var central: CBCentralManager!
     private lazy var statusItem = makeStatusItem()
     private let makeStatusItem: () -> NSStatusItem
@@ -60,8 +61,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             UserDefaults.standard.set(UserDefaults.standard.string(forKey: "headphones"), forKey: "deviceCacheHeadphones")
         }
         if let data = UserDefaults.standard.data(forKey: "devices") {
-            let saved = (try? JSONDecoder().decode([PairedDevice].self, from: data)) ?? []
-            state.devices = saved
+            state.devices = PairedDevice.cached(data)
         }
         if let button = statusItem.button {
             button.image = switcherIcon()
@@ -120,14 +120,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         let deadline = Date(timeIntervalSinceNow: 2)
         placementTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
-            let previous = self.panelTopLeft
-            let placed = self.positionPanel()
-            if placed && !self.panelShown { self.presentPanel() }
-            // Stop once the item has settled so the timer does not run for the full deadline
-            if placed && self.panelShown && self.panelTopLeft == previous {
-                timer.invalidate()
-                self.placementTimer = nil
-            } else if Date() >= deadline {
+            // The item can settle a moment after the panel opens, so keep following it until the deadline
+            if self.positionPanel(), !self.panelShown { self.presentPanel() }
+            if Date() >= deadline {
                 timer.invalidate()
                 self.placementTimer = nil
                 if !self.panelShown { self.hidePanel() }
@@ -190,7 +185,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         terminating = true
         hidePanel()
         session.begin(available: false)
-        let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+        let deadline = uptime() + 1.5
         var replied = false
         let finish = {
             guard !replied else { return }
@@ -204,7 +199,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             self.temporaryMac = nil
             self.link?.close()
             self.link = nil
-            while borrowed?.isConnected() == true && ProcessInfo.processInfo.systemUptime < deadline {
+            while borrowed?.isConnected() == true && uptime() < deadline {
                 RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
             }
             DispatchQueue.main.async(execute: finish)
@@ -331,8 +326,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
                 if discovered != nil {
                     self.listNeeded = false
                     self.lastList = Date()
+                    self.listFailed = false
                 } else if list {
                     self.nextListAttempt = Date(timeIntervalSinceNow: 5)
+                    self.listFailed = connected
                 }
                 self.refreshPending = false
                 self.refreshingList = false
@@ -466,11 +463,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
                (!session.accepts(generation) || !bluetooth.actionQueued) {
                 // Return a borrowed slot even if Info or the command channel failed
                 let closed = borrowed.closeConnection() == kIOReturnSuccess
-                let deadline = Date(timeIntervalSinceNow: 3)
-                while closed && session.accepts(generation) && borrowed.isConnected() && Date() < deadline {
+                let deadline = uptime() + 3
+                while closed && session.accepts(generation) && borrowed.isConnected() && uptime() < deadline {
                     RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
                 }
-                if session.accepts(generation) || !borrowed.isConnected() { temporaryMac = nil }
+                // Keep ownership while the Mac is still connected so a later action or quit retries
+                if !borrowed.isConnected() { temporaryMac = nil }
                 publishConnection(borrowed, connected: borrowed.isConnected(), generation: generation)
                 if !closed || borrowed.isConnected() {
                     DispatchQueue.main.async {
@@ -521,6 +519,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             return
         }
         let began = Date()
+        let switchDeadline = uptime() + 20
         let reply = disconnecting
             ? link.request(disconnect, start, target.address, yielding: { !self.session.accepts(generation) })
             : link.request(connect, start, [0] + target.address, yielding: { !self.session.accepts(generation) })
@@ -531,7 +530,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             result = .timeout
         } else {
             result = disconnecting ? .confirmed : link.waitUntilConnected(target.address, since: began,
-                timeout: max(0, 20 - Date().timeIntervalSince(began)),
+                timeout: max(0, switchDeadline - uptime()),
                 cancelled: { !self.session.accepts(generation) },
                 reopen: { self.openLink(headphones, generation: generation) })
         }
@@ -577,6 +576,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
     }
 
     private func updateState(_ change: (inout DeviceState) -> Void) {
+        let previousIdentity = state.devices.map { [$0.address, Array($0.name.utf8)] }
         var updated = state
         change(&updated)
         let fresh = Set(updated.devices.filter { updated.isFresh($0.address) }.map(\.address))
@@ -585,7 +585,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         if changed { objectWillChange.send() }
         state = updated
         displayedFresh = fresh
-        guard devicesChanged else { return }
+        // Connection flags are stale after a restart, so only names and order need saving
+        guard updated.devices.map({ [$0.address, Array($0.name.utf8)] }) != previousIdentity else { return }
         cacheSave?.cancel()
         let save = DispatchWorkItem { [weak self] in
             guard let self else { return }

@@ -7,6 +7,9 @@ let get: UInt8 = 1, start: UInt8 = 5, status: UInt8 = 3, failed: UInt8 = 4
 let result: UInt8 = 6, processing: UInt8 = 7
 let deviceManagement: UInt8 = 4, connect: UInt8 = 1, disconnect: UInt8 = 2, listDevices: UInt8 = 4, deviceInfo: UInt8 = 5
 
+// Deadlines use the monotonic clock so a system clock change cannot stretch a wait
+func uptime() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
 struct Packet {
     let block: UInt8
     let function: UInt8
@@ -92,10 +95,10 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     // The Mac gets no disconnect reply, so check its physical connection
     func disconnectHost(_ address: [UInt8], timeout: TimeInterval = 3, cancelled: () -> Bool = { false },
                         isConnected: () -> Bool) -> ActionResult {
-        let began = Date()
+        let deadline = uptime() + timeout
         let reply = request(disconnect, start, address, timeout: min(1, timeout), yielding: cancelled)
         if reply?.operation == failed { return .refused }
-        while !cancelled() && isConnected() && Date().timeIntervalSince(began) < timeout { pump(0.02) }
+        while !cancelled() && isConnected() && uptime() < deadline { pump(0.02) }
         return isConnected() ? .timeout : .confirmed
     }
 
@@ -138,6 +141,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             guard let reply = request(listDevices, get, yielding: yielding),
                   let listed = reply.pairedAddresses else { return nil }
             addresses = listed
+            readings = readings.filter { listed.contains($0.key) }
             onList?(listed)
         }
         defer { if !infoRequests.isEmpty { close() } }
@@ -148,32 +152,34 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             requestInfo(address)
         }
         if !yielding() { _ = write(2, get, [], block: 2) }
-        _ = wait(3, yielding: yielding) {
+        let answered = wait(3, yielding: yielding) {
             addresses.allSatisfy { (self.readings[$0]?.requestedAt ?? .distantPast) >= began } ? true : nil
         }
+        // BMAP has no request IDs, so retire a channel that left any reading unanswered
+        if answered == nil { close() }
         return list ? addresses : nil
     }
 
     // Accept connected replies during the polling pause too
     func waitUntilConnected(_ address: [UInt8], since began: Date, timeout: TimeInterval = 20,
                             cancelled: () -> Bool = { false }, reopen: () -> BmapLink? = { nil }) -> ActionResult {
-        let deadline = Date(timeIntervalSinceNow: timeout)
+        let deadline = uptime() + timeout
         var observer = self
-        while !cancelled() && Date() < deadline {
+        while !cancelled() && uptime() < deadline {
             if !observer.isOpen {
                 guard let replacement = reopen(), replacement.isOpen else { return .timeout }
                 observer = replacement
             }
             let requestedAt = Date()
             observer.requestInfo(address)
-            let answered: Bool? = observer.wait(min(observer.receivedPacket ? 1 : 3, deadline.timeIntervalSinceNow), yielding: cancelled) {
+            let answered: Bool? = observer.wait(min(observer.receivedPacket ? 1 : 3, deadline - uptime()), yielding: cancelled) {
                 if observer.connectionResult(address, since: began) != nil { return true }
                 return (observer.readings[address]?.requestedAt ?? .distantPast) >= requestedAt ? true : nil
             }
             if cancelled() { observer.close(); return .timeout }
             if let result = observer.connectionResult(address, since: began) { return result }
             if answered == nil { observer.close(); continue }
-            if let result = observer.wait(min(0.15, deadline.timeIntervalSinceNow), yielding: cancelled, until: {
+            if let result = observer.wait(min(0.15, deadline - uptime()), yielding: cancelled, until: {
                 observer.connectionResult(address, since: began)
             }) { return result }
         }
@@ -198,13 +204,14 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     private func write(_ function: UInt8, _ operation: UInt8, _ payload: [UInt8], block: UInt8 = deviceManagement) -> Bool {
+        guard payload.count <= Int(UInt8.max) else { return false }
         var bytes = [block, function, operation, UInt8(payload.count)] + payload
         return channel?.writeSync(&bytes, length: UInt16(bytes.count)) == kIOReturnSuccess
     }
 
     private func wait<Result>(_ timeout: TimeInterval, yielding: () -> Bool = { false }, until result: () -> Result?) -> Result? {
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while isOpen && Date() < deadline {
+        let deadline = uptime() + timeout
+        while isOpen && uptime() < deadline {
             if let found = result() { return found }
             if yielding() { return nil }
             pump(0.02)
@@ -213,8 +220,8 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     private func pump(_ seconds: TimeInterval) {
-        let deadline = Date(timeIntervalSinceNow: seconds)
-        while Date() < deadline { RunLoop.current.run(mode: .default, before: deadline) }
+        let deadline = uptime() + seconds
+        while uptime() < deadline { RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: deadline - uptime())) }
     }
 
     func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
@@ -235,12 +242,11 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             if let level = packet.batteryLevel { onBattery?(level) }
             if packet.block == deviceManagement {
                 if packet.function == deviceInfo {
-                    if let requestedAt = infoRequests.removeValue(forKey: packet.address) {
-                        if let device = packet.device {
-                            let reading = DeviceReading(device: device, requestedAt: requestedAt)
-                            readings[device.address] = reading
-                            onDevice?(reading)
-                        }
+                    // A malformed reply must not consume the request, or a later reply gets its timestamp
+                    if let device = packet.device, let requestedAt = infoRequests.removeValue(forKey: device.address) {
+                        let reading = DeviceReading(device: device, requestedAt: requestedAt)
+                        readings[device.address] = reading
+                        onDevice?(reading)
                     }
                 } else {
                     replies.append(packet)

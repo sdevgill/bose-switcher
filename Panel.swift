@@ -90,7 +90,8 @@ struct SwitcherPanel: View {
                                   visible: app.panelShown) { app.toggle(device) }
                     }
                     if app.state.devices.isEmpty {
-                        Text(app.macConnected ? "Loading devices…" : "Connect the headphones to this Mac once to load devices.")
+                        Text(app.macConnected ? (app.listFailed ? "Couldn't read devices. Retrying…" : "Loading devices…")
+                                              : "Connect the headphones to this Mac once to load devices.")
                             .font(.system(size: 12, weight: .regular)).fontWeight(.regular).foregroundStyle(PanelStyle.secondary).padding(10)
                     }
                 }
@@ -325,8 +326,10 @@ private var symbolCache: [String: NSImage] = [:]
 // Template images let the system tint the artwork
 // Cached so SwiftUI keeps the same image across updates instead of redrawing it
 func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
+    // Keep one battery image, since the level changes over time
     let key = name == "battery" ? "battery\(battery)" : name
     if let cached = symbolCache[key] { return cached }
+    if name == "battery" { symbolCache = symbolCache.filter { !$0.key.hasPrefix("battery") } }
     let image = drawSymbol(name, battery: battery)
     symbolCache[key] = image
     return image
