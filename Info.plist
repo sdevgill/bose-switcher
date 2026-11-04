@@ -14,6 +14,8 @@
     <string>1.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>27.0</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Bose Switcher talks to your headphones over Bluetooth to switch devices.</string>
 </dict>
