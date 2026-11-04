@@ -42,9 +42,43 @@ struct CoordinatorTests {
         testQuickReopen(app)
         testVisibleExpiry(app)
         testCancelledBorrow()
+        testDiscoveryRetry()
+        testReplacementBattery(app)
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 8 coordinator and artwork behavior checks")
+        print("Passed 10 coordinator and artwork behavior checks")
+    }
+
+    // Test that unsuccessful initial discovery retries without the successful-list throttle
+    static func testDiscoveryRetry() {
+        let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] },
+                      discoverHeadphones: { nil }, makeStatusItem: { NSStatusItem() })
+        app.bluetooth.start()
+        defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+        app.session.begin(available: true)
+        app.bluetoothStatus = nil
+        app.requestRefresh(list: true)
+        settle()
+        precondition(!app.refreshPending && app.lastList == .distantPast)
+        precondition(!app.shouldRefreshList && app.nextListAttempt > Date())
+        app.nextListAttempt = .distantPast
+        precondition(app.shouldRefreshList)
+        app.listNeeded = false
+        app.lastList = Date()
+        precondition(!app.shouldRefreshList)
+    }
+
+    // Test that replacing connected headphones clears the previous battery reading
+    static func testReplacementBattery(_ app: App) {
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: "deviceCacheHeadphones")
+        defer { defaults.set(previous, forKey: "deviceCacheHeadphones") }
+        defaults.set("previous-headphones", forKey: "deviceCacheHeadphones")
+        app.macConnected = true
+        app.batteryPercent = 80
+        app.publishConnection(BorrowedHeadphones(), connected: true, generation: app.session.current)
+        settle()
+        precondition(app.macConnected && app.batteryPercent == nil)
     }
 
     // Test that cancellation during physical opening releases the borrowed Mac slot

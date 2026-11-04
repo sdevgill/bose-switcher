@@ -82,7 +82,7 @@ struct SwitcherPanel: View {
                                   visible: app.panelShown) { app.toggle(device) }
                     }
                     if app.state.devices.isEmpty {
-                        Text("Connect the headphones to this Mac once to load devices.")
+                        Text(app.macConnected ? "Loading devices…" : "Connect the headphones to this Mac once to load devices.")
                             .font(.system(size: 12, weight: .regular)).fontWeight(.regular).foregroundStyle(PanelStyle.secondary).padding(10)
                     }
                 }
@@ -108,6 +108,11 @@ struct SwitcherPanel: View {
                 .glassEffect(.regular.tint(.clear), in: .rect(cornerRadius: 22))
                 .saturation(colorScheme == .dark ? 1.3 : 1.8)
                 .brightness(colorScheme == .dark ? -0.08 : -0.035)
+                .hueRotation(.degrees(colorScheme == .dark ? 0 : 6))
+                .blur(radius: 12)
+                // Sample beyond the visible edge so the blur stays opaque at the rim
+                .padding(-24)
+                .clipShape(RoundedRectangle(cornerRadius: 22))
                 .overlay { RoundedRectangle(cornerRadius: 22).fill(PanelStyle.glass) }
         }
         .overlay {

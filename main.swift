@@ -31,6 +31,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
     private var refreshAgain = false
     private var refreshListAgain = false
     private var lastList = Date.distantPast
+    private var nextListAttempt = Date.distantPast
     private var panelTimer: Timer?
     private var cacheSave: DispatchWorkItem?
     private var listNeeded = true
@@ -163,6 +164,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         refreshListAgain = false
         listNeeded = true
         lastList = .distantPast
+        nextListAttempt = .distantPast
         macConnected = false
         batteryPercent = nil
         updateState { $0.invalidateReadings() }
@@ -187,7 +189,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
                 guard let self else { return }
                 self.updateState { _ in }
                 guard !self.actionPending else { return }
-                self.requestRefresh(list: Date().timeIntervalSince(self.lastList) >= 60)
+                self.requestRefresh(list: self.shouldRefreshList)
             }
         }
     }
@@ -204,6 +206,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         panelTimer = nil
     }
 
+    private var shouldRefreshList: Bool {
+        Date() >= nextListAttempt && (listNeeded || Date().timeIntervalSince(lastList) >= 60)
+    }
+
     // Read cached devices first, then discover new pairings at idle priority
     private func requestRefresh(list: Bool = false) {
         guard bluetoothStatus == nil, session.accepts(session.current) else { return }
@@ -215,7 +221,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         refreshPending = true
         refreshingList = list
         let generation = session.current
-        if list { lastList = Date() }
+        if list { nextListAttempt = Date(timeIntervalSinceNow: 5) }
         let known = state.knownAddresses
         bluetooth.async {
             guard self.session.accepts(generation) else { return }
@@ -235,11 +241,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
                 if discovered != nil {
                     self.listNeeded = false
                     self.lastList = Date()
+                } else if list {
+                    self.nextListAttempt = Date(timeIntervalSinceNow: 5)
                 }
                 self.refreshPending = false
                 self.refreshingList = false
                 let again = self.refreshAgain
-                let nextList = self.refreshListAgain || (connected && self.listNeeded && !list && Date().timeIntervalSince(self.lastList) >= 60)
+                let nextList = self.refreshListAgain || (connected && self.shouldRefreshList && !list)
                 self.refreshAgain = false
                 self.refreshListAgain = false
                 if (again || nextList) && !self.actionPending {
@@ -292,6 +300,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableOb
         DispatchQueue.main.async {
             guard self.session.accepts(generation) else { return }
             if let identity, identity != UserDefaults.standard.string(forKey: "deviceCacheHeadphones") {
+                self.batteryPercent = nil
                 let previous = UserDefaults.standard.string(forKey: "deviceCacheHeadphones")
                 UserDefaults.standard.set(identity, forKey: "deviceCacheHeadphones")
                 if previous != nil {
