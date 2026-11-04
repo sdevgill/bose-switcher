@@ -1,4 +1,35 @@
 import Foundation
+import IOBluetooth
+
+final class FakeChannel: IOBluetoothRFCOMMChannel {
+    var opened = true
+    weak var receiver: BmapLink?
+    var onWrite: (([UInt8]) -> Void)?
+    var writes: [[UInt8]] = []
+
+    override func isOpen() -> Bool { opened }
+    override func close() -> IOReturn { opened = false; return kIOReturnSuccess }
+    override func setDelegate(_ delegate: Any!) -> IOReturn {
+        receiver = delegate as? BmapLink
+        return kIOReturnSuccess
+    }
+    override func writeSync(_ data: UnsafeMutableRawPointer!, length: UInt16) -> IOReturn {
+        guard opened else { return kIOReturnError }
+        let bytes = Array(UnsafeRawBufferPointer(start: data, count: Int(length)))
+        writes.append(bytes)
+        onWrite?(bytes)
+        return kIOReturnSuccess
+    }
+    func reply(_ function: UInt8, _ operation: UInt8, _ payload: [UInt8], after delay: TimeInterval = 0.005) {
+        let receiver = receiver
+        Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [self] _ in
+            var bytes = [deviceManagement, function, operation, UInt8(payload.count)] + payload
+            bytes.withUnsafeMutableBytes { buffer in
+                receiver?.rfcommChannelData(self, data: buffer.baseAddress!, length: buffer.count)
+            }
+        }
+    }
+}
 
 @main
 struct BehaviorTests {
@@ -11,7 +42,14 @@ struct BehaviorTests {
         testConfirmedState()
         testMissingDevicesAndOrder()
         testActionPriority()
-        print("Passed 5 hardware-free behavior checks")
+        testFirstConfirmationAndFreshness()
+        testAuthoritativeMembership()
+        testLostInfoRecovery()
+        testLateCommandReply()
+        testConnectionPolling()
+        testListValidationAndEarlyOrder()
+        testHostDisconnectFailure()
+        print("Passed 12 hardware-free behavior checks")
     }
 
     // Test that processing and error prefixes do not become part of the device address
@@ -94,5 +132,111 @@ struct BehaviorTests {
         let deadline = Date(timeIntervalSinceNow: 2)
         while !thread.isFinished && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
         precondition(thread.isFinished)
+    }
+
+    // Test that a confirmation survives the first lagging reading without authenticating cached peers
+    static func testFirstConfirmationAndFreshness() {
+        var state = DeviceState()
+        state.devices = [PairedDevice(address: phone, name: "Phone", connected: true, active: true)]
+        let date = Date()
+        state.confirm(computer, connected: true, at: date)
+        precondition(!state.isFresh(phone))
+        state.merge(DeviceReading(device: PairedDevice(address: computer, name: "Computer"), requestedAt: date.addingTimeInterval(0.1)))
+        precondition(state.devices.first { $0.address == computer }!.connected)
+        state.invalidateReadings()
+        precondition(!state.isFresh(computer))
+    }
+
+    // Test that a complete list removes forgotten devices and retains addresses with missing Info
+    static func testAuthoritativeMembership() {
+        var state = DeviceState()
+        state.devices = [PairedDevice(address: phone, name: "Phone", connected: true)]
+        state.reorder([computer])
+        precondition(state.devices.isEmpty && state.knownAddresses == [computer])
+        state.merge(DeviceReading(device: PairedDevice(address: phone, name: "Phone"), requestedAt: Date()))
+        precondition(state.devices.isEmpty)
+    }
+
+    // Test that a lost Info reply retires its channel and cannot delay later successful refreshes
+    static func testLostInfoRecovery() {
+        let lost = FakeChannel()
+        let old = BmapLink(channel: lost)
+        _ = old.refresh([phone], list: false, yielding: { false })
+        precondition(!old.isOpen && lost.writes.filter { $0[1] == deviceInfo && $0[0] == deviceManagement }.count == 1)
+        for _ in 0..<3 {
+            let channel = FakeChannel()
+            let link = BmapLink(channel: channel)
+            channel.onWrite = { bytes in
+                if bytes[0] == deviceManagement && bytes[1] == deviceInfo {
+                    channel.reply(deviceInfo, status, phone + [1, 0, 0] + Array("Phone".utf8))
+                }
+            }
+            let began = Date()
+            _ = link.refresh([phone], list: false, yielding: { false })
+            let elapsed = Date().timeIntervalSince(began)
+            precondition(link.isOpen && elapsed < 0.15)
+            print("Recovered refresh seconds", elapsed)
+        }
+    }
+
+    // Test that a timed-out action cannot deliver its error to a later channel generation
+    static func testLateCommandReply() {
+        let firstChannel = FakeChannel()
+        let first = BmapLink(channel: firstChannel)
+        firstChannel.onWrite = { _ in firstChannel.reply(connect, failed, [13] + phone, after: 0.08) }
+        precondition(first.request(connect, start, [0] + phone, timeout: 0.03) == nil)
+        precondition(!first.isOpen)
+        let secondChannel = FakeChannel()
+        let second = BmapLink(channel: secondChannel)
+        secondChannel.onWrite = { _ in secondChannel.reply(connect, processing, phone, after: 0.10) }
+        precondition(second.request(connect, start, [0] + phone, timeout: 0.2)?.operation == processing)
+    }
+
+    // Test that fast connection transitions finish without the old half-second polling pause
+    static func testConnectionPolling() {
+        let channel = FakeChannel()
+        let link = BmapLink(channel: channel)
+        let began = Date()
+        channel.onWrite = { bytes in
+            if bytes[1] == deviceInfo {
+                let connected: UInt8 = Date().timeIntervalSince(began) >= 0.05 ? 1 : 0
+                channel.reply(deviceInfo, status, phone + [connected, 0, 0] + Array("Phone".utf8))
+            }
+        }
+        precondition(link.waitUntilConnected(phone, since: began, timeout: 1) == .confirmed)
+        let elapsed = Date().timeIntervalSince(began)
+        precondition(elapsed < 0.3)
+        print("Connection confirmation seconds", elapsed)
+    }
+
+    // Test that incomplete lists cannot prune devices and complete ordering arrives before Info
+    static func testListValidationAndEarlyOrder() {
+        precondition(Packet(function: listDevices, operation: status, payload: [1] + phone.dropLast()).pairedAddresses == nil)
+        let channel = FakeChannel()
+        let link = BmapLink(channel: channel)
+        var events: [String] = []
+        link.onList = { _ in events.append("list") }
+        link.onDevice = { _ in events.append("device") }
+        channel.onWrite = { bytes in
+            if bytes[1] == listDevices { channel.reply(listDevices, status, [1] + phone) }
+            if bytes[0] == deviceManagement && bytes[1] == deviceInfo {
+                channel.reply(deviceInfo, status, phone + [0, 0, 0] + Array("Phone".utf8))
+            }
+        }
+        precondition(link.refresh([], list: true, yielding: { false }) == [phone])
+        precondition(events == ["list", "device"])
+    }
+
+    // Test that refusal and silence cannot report a still-connected Mac as disconnected
+    static func testHostDisconnectFailure() {
+        let channel = FakeChannel()
+        let link = BmapLink(channel: channel)
+        channel.onWrite = { _ in channel.reply(disconnect, failed, [13] + computer) }
+        precondition(link.disconnectHost(computer, timeout: 0.05, isConnected: { true }) == .refused)
+        channel.onWrite = nil
+        precondition(link.disconnectHost(computer, timeout: 0.05, isConnected: { true }) == .timeout)
+        let closedChannel = FakeChannel()
+        let closed = BmapLink(channel: closedChannel)
+        precondition(closed.disconnectHost(computer, timeout: 0.05, isConnected: { false }) == .confirmed)
     }
 }

@@ -1,20 +1,30 @@
 import AppKit
 import SwiftUI
 import IOBluetooth
+import CoreBluetooth
 
-final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableObject {
-    @Published var state = DeviceState()
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject, CBCentralManagerDelegate {
+    private(set) var state = DeviceState()
     @Published var actions: [[UInt8]: RowAction] = [:]
     @Published var macConnected = false
     @Published var headphonesName = UserDefaults.standard.string(forKey: "headphonesName") ?? "Headphones"
     @Published var actionPending = false
     @Published var panelShown = false
     @Published var batteryPercent: Int?
+    @Published var bluetoothStatus: String? = "Loading Bluetooth…"
+    private var central: CBCentralManager!
+    private let statusItem = NSStatusBar.system.statusItem(withLength: 36)
+    private let statusLabel = StatusLabel()
+    private let panel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    private var panelTopLeft = NSPoint.zero
 
-    private let statusItem = NSStatusBar.system.statusItem(withLength: 29)
-    private let popover = NSPopover()
     private let bluetooth = BluetoothThread()
     private var refreshPending = false
+    private var refreshAgain = false
+    private var refreshListAgain = false
+    private var lastList = Date.distantPast
+    private var panelTimer: Timer?
+    private var cacheSave: DispatchWorkItem?
     private var listNeeded = true
     private var completedActions: [[UInt8]: UUID] = [:]
     // Only the Bluetooth thread touches the link
@@ -22,46 +32,114 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
     private var temporaryMac = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem.button?.image = switcherIcon()
+        if let data = UserDefaults.standard.data(forKey: "devices") {
+            let saved = (try? JSONDecoder().decode([PairedDevice].self, from: data)) ?? []
+            state.devices = saved.filter { $0.symbol == "laptopcomputer" } + saved.filter { $0.symbol == "appletv" } +
+                saved.filter { $0.symbol != "laptopcomputer" && $0.symbol != "appletv" }
+        }
+        if let button = statusItem.button {
+            statusLabel.frame = button.bounds
+            statusLabel.autoresizingMask = [.width, .height]
+            button.addSubview(statusLabel)
+            button.setAccessibilityLabel("Bose Switcher")
+        }
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
-        updateTooltip()
-        popover.behavior = .transient
-        popover.delegate = self
-        popover.contentViewController = NSHostingController(rootView: SwitcherPanel(app: self))
-        if let data = UserDefaults.standard.data(forKey: "devices") {
-            state.devices = (try? JSONDecoder().decode([PairedDevice].self, from: data)) ?? []
-        }
+        statusItem.button?.toolTip = "Bose Switcher"
+        panel.delegate = self
+        panel.level = .popUpMenu
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        let view = NSHostingView(rootView: SwitcherPanel(app: self)
+            .onGeometryChange(for: CGSize.self, of: { $0.size }, action: { self.resizePanel($0) }))
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+        view.layer?.cornerRadius = 22
+        view.layer?.masksToBounds = true
+        panel.contentView = view
+        panel.setContentSize(view.fittingSize)
         bluetooth.start()
-        requestRefresh(list: state.devices.isEmpty)
+        if CBManager.authorization == .notDetermined { bluetoothStatus = "Allow Bluetooth access…" }
+        central = CBCentralManager(delegate: self, queue: .main)
     }
 
     @objc private func togglePanel() {
+        if panelShown { hidePanel(); return }
         guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            NSApplication.shared.activate()
-            panelShown = true
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+        let anchor = button.accessibilityFrame()
+        let screen = NSScreen.screens.first { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) } ?? NSScreen.main!
+        let visible = screen.visibleFrame
+        panelTopLeft = NSPoint(x: min(max(anchor.minX, visible.minX + 8), visible.maxX - 264),
+                               y: min(anchor.minY - 8, screen.frame.maxY - 38))
+        panel.setFrameTopLeftPoint(panelTopLeft)
+        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
+        panel.invalidateShadow()
+        button.toolTip = nil
+        statusLabel.selected = true
+        showPanel()
+    }
+
+    private func resizePanel(_ size: CGSize) {
+        guard size.width > 0, size.height > 0, panel.frame.size != size else { return }
+        panel.setContentSize(size)
+        if panelShown { panel.setFrameTopLeftPoint(panelTopLeft) }
+    }
+
+    func windowDidResignKey(_ notification: Notification) { hidePanel() }
+
+    // Ask asynchronously before entering IOBluetooth's blocking permission wait
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        switch central.state {
+        case .poweredOn:
+            bluetoothStatus = nil
             requestRefresh(list: state.devices.isEmpty)
+        case .unauthorized:
+            bluetoothStatus = "Allow Bluetooth in System Settings"
+        case .poweredOff:
+            bluetoothStatus = "Bluetooth is turned off"
+            macConnected = false
+            batteryPercent = nil
+        case .unsupported: bluetoothStatus = "Bluetooth is unavailable"
+        default: bluetoothStatus = CBManager.authorization == .notDetermined ? "Allow Bluetooth access…" : "Loading Bluetooth…"
         }
     }
 
-    func popoverDidClose(_ notification: Notification) {
-        panelShown = false
+    func showPanel() {
+        panelShown = true
+        if panelTimer == nil {
+            requestRefresh(list: state.devices.isEmpty)
+            panelTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                guard let self, !self.actionPending else { return }
+                self.requestRefresh(list: Date().timeIntervalSince(self.lastList) >= 60)
+            }
+        }
     }
 
-    private func updateTooltip() {
-        statusItem.button?.toolTip = "Bose Switcher · \(headphonesName)"
+    func hidePanel() {
+        guard panelShown else { return }
+        panelShown = false
+        panel.orderOut(nil)
+        statusLabel.selected = false
+        statusItem.button?.toolTip = "Bose Switcher"
+        panelTimer?.invalidate()
+        panelTimer = nil
     }
 
     // A cached launch starts with Info, then discovers new pairings at idle priority
     private func requestRefresh(list: Bool = false) {
-        guard !refreshPending else { return }
+        guard bluetoothStatus == nil else { return }
+        guard !refreshPending else {
+            refreshAgain = true
+            refreshListAgain = refreshListAgain || list
+            return
+        }
         refreshPending = true
-        let known = state.devices.map(\.address)
+        if list { lastList = Date() }
+        let known = state.knownAddresses
         bluetooth.async {
             let headphones = findHeadphones()
             let connected = headphones?.isConnected() ?? false
@@ -72,14 +150,17 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
             }
             let discovered = order
             DispatchQueue.main.async {
-                if let discovered {
-                    self.state.reorder(discovered)
+                if discovered != nil {
                     self.listNeeded = false
-                    self.saveDevices()
+                    self.lastList = Date()
                 }
                 self.refreshPending = false
-                if connected && self.listNeeded && !list && !self.actionPending {
-                    self.requestRefresh(list: true)
+                let again = self.refreshAgain
+                let nextList = self.refreshListAgain || (connected && self.listNeeded && !list && Date().timeIntervalSince(self.lastList) >= 60)
+                self.refreshAgain = false
+                self.refreshListAgain = false
+                if (again || nextList) && !self.actionPending {
+                    self.requestRefresh(list: nextList)
                 }
             }
         }
@@ -90,12 +171,25 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
         link = BmapLink(device: headphones)
         link?.onDevice = { reading in
             DispatchQueue.main.async {
-                self.state.merge(reading)
-                self.saveDevices()
+                self.updateState { $0.merge(reading) }
+            }
+        }
+        let computer = macAddress()
+        link?.onList = { addresses in
+            DispatchQueue.main.async {
+                // Pairing responses can change order after a switch, but visible rows must not
+                let televisions = self.state.devices.filter { $0.symbol == "appletv" }.map(\.address)
+                let previous = self.state.knownAddresses.filter { addresses.contains($0) }
+                let stable = previous + addresses.filter { !previous.contains($0) }
+                let ordered = stable.filter { $0 == computer } + stable.filter { televisions.contains($0) && $0 != computer } +
+                    stable.filter { $0 != computer && !televisions.contains($0) }
+                self.updateState { $0.reorder(ordered) }
+                self.actions = self.actions.filter { addresses.contains($0.key) }
+                self.completedActions = self.completedActions.filter { addresses.contains($0.key) }
             }
         }
         link?.onBattery = { level in
-            DispatchQueue.main.async { self.batteryPercent = level }
+            DispatchQueue.main.async { if self.batteryPercent != level { self.batteryPercent = level } }
         }
         link?.onClose = {
             let headphones = findHeadphones()
@@ -109,31 +203,37 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
         let name = headphones?.name
         let address = macAddress()
         DispatchQueue.main.async {
-            if let name, !name.isEmpty {
+            if let name, !name.isEmpty, name != self.headphonesName {
                 self.headphonesName = name
                 UserDefaults.standard.set(name, forKey: "headphonesName")
-                self.updateTooltip()
             }
             if self.macConnected != connected {
                 self.macConnected = connected
+                if connected {
+                    self.listNeeded = true
+                    self.lastList = .distantPast
+                }
                 if !connected { self.batteryPercent = nil }
-                self.state.confirm(address, connected: connected)
-                self.saveDevices()
+                self.updateState {
+                    $0.invalidateReadings()
+                    $0.confirm(address, connected: connected)
+                }
             }
         }
     }
 
     func toggle(_ target: PairedDevice) {
-        guard !actionPending else { return }
+        guard !actionPending, bluetoothStatus == nil, state.knownAddresses.contains(target.address) else { return }
         let disconnecting = macConnected && target.connected
+        let needsReading = macConnected && !state.isFresh(target.address)
         actionPending = true
         completedActions[target.address] = nil
-        actions[target.address] = .working(disconnecting: disconnecting)
-        statusItem.button?.appearsDisabled = true
-        bluetooth.async(action: true) { self.send(target, disconnecting: disconnecting) }
+        actions[target.address] = needsReading ? .checking : .working(disconnecting: disconnecting)
+        bluetooth.async(action: true) { self.send(target, disconnecting: disconnecting, needsReading: needsReading) }
     }
 
-    private func send(_ target: PairedDevice, disconnecting: Bool) {
+    private func send(_ target: PairedDevice, disconnecting: Bool, needsReading: Bool) {
+        var disconnecting = disconnecting
         guard let headphones = findHeadphones() else {
             finish(target, disconnecting: disconnecting, result: .timeout)
             return
@@ -146,6 +246,21 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
             return
         }
         if !macWasConnected { temporaryMac = true }
+        defer {
+            if temporaryMac && !isMac && !bluetooth.actionQueued {
+                // Return a borrowed slot even if Info or the command channel failed
+                let closed = headphones.closeConnection() == kIOReturnSuccess
+                let deadline = Date(timeIntervalSinceNow: 3)
+                while closed && headphones.isConnected() && Date() < deadline {
+                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+                }
+                temporaryMac = false
+                publishConnection(headphones, connected: headphones.isConnected())
+                if !closed || headphones.isConnected() {
+                    DispatchQueue.main.async { self.actions[address] = .failed(reason: "Couldn't disconnect") }
+                }
+            }
+        }
         publishConnection(headphones, connected: true)
         if isMac && !disconnecting {
             temporaryMac = false
@@ -153,18 +268,24 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
             return
         }
         guard let link = openLink(headphones) else {
-            if temporaryMac { _ = headphones.closeConnection() }
-            temporaryMac = false
             publishConnection(headphones, connected: findHeadphones()?.isConnected() ?? false)
             finish(target, disconnecting: disconnecting, result: .timeout)
             return
         }
+        if needsReading && !isMac {
+            guard let reading = link.readDevice(target.address) else {
+                finish(target, disconnecting: disconnecting, result: .timeout)
+                return
+            }
+            disconnecting = reading.connected
+            let resolved = disconnecting
+            DispatchQueue.main.async { self.actions[target.address] = .working(disconnecting: resolved) }
+        }
         if isMac {
-            // The Mac gets no reply to its own disconnect
-            link.request(disconnect, start, target.address, timeout: 1)
+            let result = link.disconnectHost(address, isConnected: { headphones.isConnected() })
             temporaryMac = false
-            publishConnection(headphones, connected: false)
-            finish(target, disconnecting: true, result: .confirmed)
+            publishConnection(headphones, connected: headphones.isConnected())
+            finish(target, disconnecting: true, result: result)
             return
         }
         let began = Date()
@@ -181,21 +302,14 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
         }
         // Publish and unlock before giving the Mac's temporary slot back
         finish(target, disconnecting: disconnecting, result: result)
-        if temporaryMac && !bluetooth.actionQueued {
-            // Once sent, the disconnect must settle before another action can use the link
-            link.request(disconnect, start, address, timeout: 1)
-            temporaryMac = false
-            publishConnection(headphones, connected: findHeadphones()?.isConnected() ?? false)
-        }
     }
 
     private func finish(_ target: PairedDevice, disconnecting: Bool, result: ActionResult) {
         DispatchQueue.main.sync {
             switch result {
             case .confirmed:
-                self.state.confirm(target.address, connected: !disconnecting)
+                self.updateState { $0.confirm(target.address, connected: !disconnecting) }
                 self.actions[target.address] = .confirmed
-                self.saveDevices()
             case .refused:
                 self.actions[target.address] = .failed(reason: disconnecting ? "Couldn't disconnect" : "Couldn't connect")
                 NSSound.beep()
@@ -203,7 +317,6 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
                 self.actions[target.address] = .failed(reason: "No answer")
             }
             self.actionPending = false
-            self.statusItem.button?.appearsDisabled = false
             let completion = UUID()
             self.completedActions[target.address] = completion
             self.requestRefresh(list: self.state.devices.isEmpty)
@@ -215,8 +328,20 @@ final class App: NSObject, NSApplicationDelegate, NSPopoverDelegate, ObservableO
         }
     }
 
-    private func saveDevices() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(state.devices), forKey: "devices")
+    private func updateState(_ change: (inout DeviceState) -> Void) {
+        var updated = state
+        change(&updated)
+        let changed = updated.devices != state.devices || updated.devices.contains { updated.isFresh($0.address) != state.isFresh($0.address) }
+        if changed { objectWillChange.send() }
+        state = updated
+        guard changed else { return }
+        cacheSave?.cancel()
+        let save = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(try? JSONEncoder().encode(self.state.devices), forKey: "devices")
+        }
+        cacheSave = save
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: save)
     }
 }
 
@@ -235,4 +360,9 @@ struct BoseSwitcher {
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
     }
+}
+
+final class MenuPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override func cancelOperation(_ sender: Any?) { (delegate as? App)?.hidePanel() }
 }

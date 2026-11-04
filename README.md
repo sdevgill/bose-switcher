@@ -2,7 +2,7 @@
 
 A macOS 27 menu bar app that switches the devices connected to Bose QC Ultra Headphones (2nd Gen). Firmware 8.2.20 removed switching from the power button.
 
-Click the headphones with the swap-arrows badge to open the glass panel. It follows design E: the headphones' name and battery above one list, in the headphones' order. Blue circles mean connected. The status below a name says Playing or Connected. Names omit the possessive owner prefix on screen, but accessibility keeps the full device name.
+Click the headphones with the swap-arrows badge to open the glass panel. It follows design E: the headphones' name and battery above one list, with this Mac first, televisions next, and the remaining devices in a stable order. Blue circles mean connected. The status below a name says Playing or Connected. Names omit the possessive owner prefix on screen, but accessibility keeps the full device name.
 
 Click a connected device to disconnect it, or another device to connect it. The panel stays open. An animated arc and Connecting… or Disconnecting… show progress on the row. A refusal shows Couldn't connect (or Couldn't disconnect) and beeps. A timeout shows No answer. Errors clear after three seconds. Quit also supports ⌘Q.
 
@@ -17,7 +17,7 @@ Requires macOS 27 and the macOS 27 SDK in the Xcode command line tools.
 open ~/Applications/"Bose Switcher.app"
 ```
 
-The build script compiles every root Swift file, signs the app and installs it into `~/Applications`. It replaces the installed copy, so quit that copy before building.
+The build script compiles every root Swift file, signs the app and installs it into `~/Applications`. It replaces the installed copy, so quit that copy before building. Local ad-hoc signatures change when the executable changes, so macOS may ask for Bluetooth permission again after rebuilding. The app waits for permission before starting Bluetooth work and keeps device actions disabled until Bluetooth is ready.
 
 To compile and check behavior without installing, launching the app or accessing Bluetooth:
 
@@ -32,11 +32,13 @@ This compiles into a temporary folder, runs hardware-free packet, state and queu
 The app uses Bose's private BMAP protocol on one RFCOMM channel (2), as reverse-engineered by [bosectl](https://github.com/aaronsb/bosectl). DeviceManagement commands are ListDevices `[4.4]`, Info `[4.5]`, Connect `[4.1]` with `00 + MAC`, and Disconnect `[4.2]` with `MAC`. Battery GET `[2.2]` reads the first response byte as a percentage, following [bosectl's parser](https://github.com/aaronsb/bosectl/blob/main/python/pybmap/devices/parsers.py). No cloud login is needed.
 
 - A dedicated Bluetooth thread pumps the default run-loop mode, which IOBluetooth needs for data callbacks. UI state stays on the main thread.
-- Actions take priority over queued refreshes. A refresh checks for queued actions every 20 ms while waiting for replies and yields. Jobs never run inside other jobs. Synchronous system Bluetooth calls and the existing 0.5-second link-opening pause cannot yield.
+- Actions take priority over queued refreshes. A refresh checks for queued actions every 20 ms while waiting for replies and yields. Jobs never run inside other jobs. Synchronous system Bluetooth calls cannot yield. An open RFCOMM channel sends its first request immediately.
 - With cached devices, launch requests their Info together, then lists pairings at idle priority. Without a cache, it lists first. Battery shares the refresh channel without an extra reply wait.
 - A connect completes on connected Info, and a remote disconnect completes on RESULT, not PROCESSING. Confirmation updates the row and unlocks clicks before refreshing or returning the Mac's temporary connection slot.
-- If another action is already queued, it reuses the temporary Mac connection. Once self-disconnect has been sent, its existing one-second wait must settle before the next command can use the link.
-- Info replies merge by address as they arrive. Missing replies keep current state. Outstanding requests retain their dates across commands so late replies cannot undo newer state. BMAP has no request IDs: replies for each address are matched in request order. A lost reply therefore makes later data conservatively older rather than newer.
+- If another action is already queued, it reuses the temporary Mac connection. Otherwise the app returns that temporary connection even after a failed read. An explicit Mac disconnect confirms physical disconnection and honors refusals.
+- Info replies merge by address as they arrive. Only one Info request per device can be outstanding. A missing reply or interrupted refresh closes the channel before another attempt, because BMAP has no request IDs. Timed-out commands also retire their channel, so their late replies cannot complete a retry.
+- Complete pairing lists prune forgotten devices, retain addresses awaiting Info and establish ordering before rows arrive. The visible panel refreshes every two seconds and checks pairings every minute. Refresh requests coalesce into a follow-up instead of being dropped.
+- Cached names remain available, but cached connection flags do not become live after a reconnect. Unknown rows are checked before choosing a toggle action. Only changed row data publishes UI updates, and cache writes are batched.
 - Confirmed state rejects contradictory Info requested within 2.5 seconds of confirmation, covering the measured firmware lag. Another background refresh runs after three seconds. Mac connectivity is tracked separately from device freshness.
 - Connect polling checks throughout its pause, so late connected Info ends the wait immediately. Row actions expose idle, working, failed and confirmed states.
 - The progress arc rotates in Core Animation. Closing the panel stops its animation, and Reduce Motion shows a still arc.
@@ -58,6 +60,6 @@ Compilation and pure behavior checks do not verify the UI or Bluetooth. Before u
 - The headphones hold two connections. Connecting a third drops the one that is not playing.
 - Phones take 6–17 seconds to join. The app cannot shorten that handshake.
 - The headphones only connect devices while worn.
-- A Mac that joins just to send a command leaves afterwards, even when the command fails. The explicit `openConnection()` and 0.5-second RFCOMM pause are preserved. Self-disconnect keeps its one-second timeout because the Mac receives no reply.
+- A Mac that joins just to send a command leaves afterwards, even when the command fails. The explicit `openConnection()` is preserved. Self-disconnect waits for physical confirmation because the Mac receives no BMAP reply.
 - Only one RFCOMM client per Mac can talk to the headphones. Quit Bose Switcher before running bosectl.
-- The earlier Bluetooth behavior was tested on firmware 10.12.14. This redesign still needs hardware validation.
+- The earlier Bluetooth behavior was tested on firmware 10.12.14. Successful remote switches, eviction and Mac self-disconnect still need validation while the headphones are worn.

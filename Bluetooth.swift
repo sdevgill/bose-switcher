@@ -36,6 +36,13 @@ struct Packet {
         guard block == 2, function == 2, operation == status, let level = payload.first, level <= 100 else { return nil }
         return Int(level)
     }
+
+    var pairedAddresses: [[UInt8]]? {
+        guard block == deviceManagement, function == listDevices, operation == status,
+              !payload.isEmpty, (payload.count - 1) % 6 == 0 else { return nil }
+        let addresses = stride(from: 1, to: payload.count, by: 6).map { Array(payload[$0 ..< $0 + 6]) }
+        return Set(addresses).count == addresses.count ? addresses : nil
+    }
 }
 
 struct DeviceReading {
@@ -48,11 +55,12 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     private var channel: IOBluetoothRFCOMMChannel?
     private var unread: [UInt8] = []
     private var replies: [Packet] = []
-    private var infoRequests: [[UInt8]: [Date]] = [:]
+    private var infoRequests: [[UInt8]: Date] = [:]
     private var readings: [[UInt8]: DeviceReading] = [:]
     var onDevice: ((DeviceReading) -> Void)?
     var onBattery: ((Int) -> Void)?
     var onClose: (() -> Void)?
+    var onList: (([[UInt8]]) -> Void)?
 
     init?(device: IOBluetoothDevice) {
         super.init()
@@ -60,10 +68,35 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         guard device.openRFCOMMChannelSync(&opened, withChannelID: bmapChannel, delegate: self) == kIOReturnSuccess,
               let opened else { return nil }
         channel = opened
-        pump(0.5)
     }
 
     var isOpen: Bool { channel?.isOpen() ?? false }
+
+    init(channel: IOBluetoothRFCOMMChannel) {
+        self.channel = channel
+        super.init()
+        channel.setDelegate(self)
+    }
+
+    // A fresh channel is the only unambiguous boundary when BMAP loses a reply
+    func close() {
+        let previous = channel
+        channel = nil
+        previous?.setDelegate(nil)
+        previous?.close()
+        infoRequests.removeAll()
+    }
+
+    // The local host gets no reply, so confirm against the physical connection instead
+    func disconnectHost(_ address: [UInt8], timeout: TimeInterval = 3, isConnected: () -> Bool) -> ActionResult {
+        let began = Date()
+        let reply = request(disconnect, start, address, timeout: min(1, timeout))
+        if reply?.operation == failed { return .refused }
+        while isConnected() && Date().timeIntervalSince(began) < timeout { pump(0.02) }
+        return isConnected() ? .timeout : .confirmed
+    }
+
+    deinit { close() }
 
     // Only retire replies for this command, leaving late Info replies alone
     @discardableResult
@@ -71,13 +104,27 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
                  yielding: () -> Bool = { false }) -> Packet? {
         let address = Array(payload.suffix(6))
         replies.removeAll { $0.function == function && $0.address.starts(with: address) }
-        guard write(function, operation, payload) else { return nil }
-        return wait(timeout, yielding: yielding) {
+        guard write(function, operation, payload) else { close(); return nil }
+        let reply: Packet? = wait(timeout, yielding: yielding) {
             self.replies.first {
                 $0.function == function && $0.address.starts(with: address) &&
-                (function != disconnect || $0.operation == failed || ($0.operation == result && $0.payload.count == 6))
+                (function != disconnect || $0.operation == failed || ($0.operation == result && $0.payload.count == 6)) &&
+                (function != connect || $0.operation == failed || $0.operation == processing)
             }
         }
+        if reply == nil { close() }
+        return reply
+    }
+
+    func readDevice(_ address: [UInt8]) -> PairedDevice? {
+        let began = Date()
+        requestInfo(address)
+        let reading: PairedDevice? = wait(3) {
+            guard let reading = self.readings[address], reading.requestedAt >= began else { return nil }
+            return reading.device
+        }
+        if reading == nil { close() }
+        return reading
     }
 
     // Known devices get Info together, listing pairings is separate idle work
@@ -85,12 +132,12 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         guard !yielding() else { return nil }
         var addresses = known
         if list {
-            guard let reply = request(listDevices, get, yielding: yielding), reply.operation == status,
-                  !reply.payload.isEmpty else { return nil }
-            addresses = stride(from: 1, to: max(1, reply.payload.count - 5), by: 6).map {
-                Array(reply.payload[$0 ..< $0 + 6])
-            }
+            guard let reply = request(listDevices, get, yielding: yielding),
+                  let listed = reply.pairedAddresses else { return nil }
+            addresses = listed
+            onList?(listed)
         }
+        defer { if !infoRequests.isEmpty { close() } }
         guard !yielding() else { return nil }
         let began = Date()
         for address in addresses {
@@ -115,10 +162,11 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
                 return (self.readings[address]?.requestedAt ?? .distantPast) >= requestedAt ? true : nil
             }
             if let result = connectionResult(address, since: began) { return result }
-            if let result = wait(min(0.5, deadline.timeIntervalSinceNow), until: {
+            if let result = wait(min(0.15, deadline.timeIntervalSinceNow), until: {
                 self.connectionResult(address, since: began)
             }) { return result }
         }
+        close()
         return .timeout
     }
 
@@ -133,8 +181,9 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     private func requestInfo(_ address: [UInt8]) {
-        infoRequests[address, default: []].append(Date())
-        if !write(deviceInfo, get, address) { infoRequests[address]?.removeLast() }
+        guard infoRequests[address] == nil else { return }
+        infoRequests[address] = Date()
+        if !write(deviceInfo, get, address) { close() }
     }
 
     private func write(_ function: UInt8, _ operation: UInt8, _ payload: [UInt8], block: UInt8 = deviceManagement) -> Bool {
@@ -158,12 +207,14 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
+        guard rfcommChannel === channel else { return }
         channel = nil
         onClose?()
     }
 
     // Keep request dates with Info replies so an old refresh cannot undo a confirmation
     func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!, data dataPointer: UnsafeMutableRawPointer!, length dataLength: Int) {
+        guard rfcommChannel === channel else { return }
         unread += UnsafeRawBufferPointer(start: dataPointer, count: dataLength)
         while unread.count >= 4 {
             let end = 4 + Int(unread[3])
@@ -172,9 +223,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             if let level = packet.batteryLevel { onBattery?(level) }
             if packet.block == deviceManagement {
                 if packet.function == deviceInfo {
-                    if var pending = infoRequests[packet.address], !pending.isEmpty {
-                        let requestedAt = pending.removeFirst()
-                        infoRequests[packet.address] = pending
+                    if let requestedAt = infoRequests.removeValue(forKey: packet.address) {
                         if let device = packet.device {
                             let reading = DeviceReading(device: device, requestedAt: requestedAt)
                             readings[device.address] = reading
