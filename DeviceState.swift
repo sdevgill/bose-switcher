@@ -9,7 +9,8 @@ struct PairedDevice: Codable, Identifiable, Equatable {
 
     var displayName: String {
         if let prefix = name.range(of: "’s ") ?? name.range(of: "'s ") {
-            return String(name[prefix.upperBound...])
+            let shortened = String(name[prefix.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !shortened.isEmpty { return shortened }
         }
         return name
     }
@@ -31,7 +32,6 @@ enum RowAction: Equatable {
     case checking
     case working(disconnecting: Bool)
     case failed(reason: String)
-    case confirmed
 
     var working: Bool {
         if case .checking = self { return true }
@@ -50,9 +50,26 @@ struct DeviceState {
     private var fresh: Set<[UInt8]> = []
 
     var knownAddresses: [[UInt8]] { membershipKnown ? order : devices.map(\.address) }
-    func isFresh(_ address: [UInt8]) -> Bool { fresh.contains(address) }
+    func isFresh(_ address: [UInt8], at date: Date = Date()) -> Bool {
+        fresh.contains(address) && date.timeIntervalSince(updatedAt[address] ?? .distantPast) < 5
+    }
 
-    mutating func invalidateReadings() { fresh.removeAll() }
+    func displayName(for device: PairedDevice) -> String {
+        devices.contains { $0.address != device.address && $0.displayName == device.displayName }
+            ? device.name : device.displayName
+    }
+
+    mutating func invalidateReadings() {
+        fresh.removeAll()
+        protectedUntil.removeAll()
+        confirmedConnections.removeAll()
+    }
+
+    mutating func reconcileOrder(_ addresses: [[UInt8]], computer: [UInt8]) {
+        let previous = knownAddresses.filter { addresses.contains($0) }
+        let stable = previous + addresses.filter { !previous.contains($0) }
+        reorder(stable.filter { $0 == computer } + stable.filter { $0 != computer })
+    }
 
     // Missing answers leave the current device alone, including its confirmed state
     mutating func merge(_ reading: DeviceReading) {
@@ -104,5 +121,22 @@ struct DeviceState {
             (order.firstIndex(of: $0.address) ?? order.count + (previous.firstIndex(of: $0.address) ?? 0)) <
             (order.firstIndex(of: $1.address) ?? order.count + (previous.firstIndex(of: $1.address) ?? 0))
         }
+    }
+}
+
+// Power and sleep boundaries cancel queued work without sharing main-thread state
+final class WorkSession {
+    private let lock = NSLock()
+    private var generation = 0
+    private var available = false
+
+    var current: Int { lock.withLock { generation } }
+
+    func begin(available: Bool) {
+        lock.withLock { generation += 1; self.available = available }
+    }
+
+    func accepts(_ generation: Int) -> Bool {
+        lock.withLock { available && self.generation == generation }
     }
 }

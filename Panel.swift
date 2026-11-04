@@ -12,6 +12,8 @@ private enum PanelStyle {
     static let circle = color(0x000000, 0xffffff, lightAlpha: 0.07, darkAlpha: 0.12)
     static let line = color(0x000000, 0xffffff, lightAlpha: 0.09, darkAlpha: 0.10)
     static let glass = color(0xf6f7fb, 0x2a2a30, lightAlpha: 0.60, darkAlpha: 0.55)
+    static let rim = color(0xffffff, 0xffffff, lightAlpha: 0.95, darkAlpha: 0.22)
+    static let inner = color(0xffffff, 0xffffff, lightAlpha: 0.45, darkAlpha: 0.07)
 
     private static func color(_ light: UInt32, _ dark: UInt32, lightAlpha: CGFloat = 1, darkAlpha: CGFloat = 1) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -74,7 +76,7 @@ struct SwitcherPanel: View {
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(app.state.devices) { device in
-                        DeviceRow(device: device, action: app.actions[device.address] ?? .idle,
+                        DeviceRow(device: device, displayName: app.state.displayName(for: device), action: app.actions[device.address] ?? .idle,
                                   live: app.macConnected && app.state.isFresh(device.address), disabled: app.actionPending || app.bluetoothStatus != nil,
                                   visible: app.panelShown) { app.toggle(device) }
                     }
@@ -100,12 +102,20 @@ struct SwitcherPanel: View {
         .padding(8)
         .frame(width: 256)
         .foregroundStyle(PanelStyle.strong)
-        .glassEffect(.regular.tint(PanelStyle.glass), in: .rect(cornerRadius: 22))
+        .background(.ultraThinMaterial, in: .rect(cornerRadius: 22))
+        .glassEffect(.clear.tint(PanelStyle.glass), in: .rect(cornerRadius: 22))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22)
+                .strokeBorder(LinearGradient(colors: [PanelStyle.rim, PanelStyle.inner], startPoint: .top, endPoint: .bottom), lineWidth: 1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 }
 
 private struct DeviceRow: View {
     let device: PairedDevice
+    let displayName: String
     let action: RowAction
     let live: Bool
     let disabled: Bool
@@ -127,8 +137,7 @@ private struct DeviceRow: View {
     var body: some View {
         Button(action: toggle) {
             HStack(spacing: 10) {
-                DeviceGlyph(symbol: device.symbol)
-                    .stroke(style: StrokeStyle(lineWidth: 1.125, lineCap: .round, lineJoin: .round))
+                Image(nsImage: referenceSymbol(device.symbol)).resizable()
                     .foregroundStyle(connected ? Color.white : PanelStyle.strong)
                     .frame(width: 18, height: 18)
                     .frame(width: 28, height: 28)
@@ -139,11 +148,12 @@ private struct DeviceRow: View {
                         }
                     }
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(device.displayName).font(.system(size: 13, weight: .regular)).fontWeight(.regular).lineLimit(1).frame(height: 16)
+                    Text(displayName).font(.system(size: 13, weight: .regular)).fontWeight(.regular).lineLimit(1).frame(height: 16)
                     if case .checking = action {
                         Text("Checking…").font(.system(size: 11, weight: .regular)).fontWeight(.regular).foregroundStyle(PanelStyle.accentText).frame(height: 14)
                     } else if case .working(let disconnecting) = action {
-                        WorkingLabel(disconnecting: disconnecting)
+                        Text(disconnecting ? "Disconnecting…" : "Connecting…")
+                            .font(.system(size: 11, weight: .regular)).fontWeight(.regular).foregroundStyle(PanelStyle.accentText).frame(height: 14)
                     } else if case .failed(let reason) = action {
                         Text(reason).font(.system(size: 11, weight: .regular)).fontWeight(.regular).foregroundStyle(PanelStyle.secondary).frame(height: 14)
                     } else if connected {
@@ -163,6 +173,7 @@ private struct DeviceRow: View {
         .disabled(disabled)
         .accessibilityLabel(device.name)
         .accessibilityValue(state)
+        .help(device.name)
     }
 }
 
@@ -171,52 +182,6 @@ private struct DeviceButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(configuration.isPressed ? PanelStyle.circle : .clear, in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-private struct WorkingLabel: View {
-    let disconnecting: Bool
-
-    var body: some View {
-        Text(disconnecting ? "Disconnecting…" : "Connecting…")
-            .font(.system(size: 11, weight: .regular)).fontWeight(.regular).foregroundStyle(PanelStyle.accentText).frame(height: 14)
-    }
-}
-
-// The device silhouettes use the same 24-point paths as the approved E frames
-private struct DeviceGlyph: Shape {
-    let symbol: String
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        func line(_ points: CGPoint...) {
-            guard let first = points.first else { return }
-            path.move(to: first)
-            for point in points.dropFirst() { path.addLine(to: point) }
-        }
-        switch symbol {
-        case "iphone":
-            path.addRoundedRect(in: CGRect(x: 6.75, y: 2.75, width: 10.5, height: 18.5), cornerSize: CGSize(width: 2.7, height: 2.7))
-            line(CGPoint(x: 10.6, y: 5.5), CGPoint(x: 13.4, y: 5.5))
-        case "laptopcomputer":
-            path.addRoundedRect(in: CGRect(x: 4, y: 5, width: 16, height: 11), cornerSize: CGSize(width: 1.6, height: 1.6))
-            line(CGPoint(x: 1.9, y: 18.7), CGPoint(x: 22.1, y: 18.7))
-        case "appletv":
-            line(CGPoint(x: 6.2, y: 8.2), CGPoint(x: 17.8, y: 8.2), CGPoint(x: 20.2, y: 11.8), CGPoint(x: 20.2, y: 16.2))
-            path.addQuadCurve(to: CGPoint(x: 18.4, y: 18), control: CGPoint(x: 20.2, y: 18))
-            path.addLine(to: CGPoint(x: 5.6, y: 18))
-            path.addQuadCurve(to: CGPoint(x: 3.8, y: 16.2), control: CGPoint(x: 3.8, y: 18))
-            path.addLine(to: CGPoint(x: 3.8, y: 11.8))
-            path.closeSubpath()
-            line(CGPoint(x: 3.8, y: 11.8), CGPoint(x: 20.2, y: 11.8))
-        default:
-            path.addRoundedRect(in: CGRect(x: 2.5, y: 4.5, width: 13, height: 9.5), cornerSize: CGSize(width: 1.4, height: 1.4))
-            path.addRoundedRect(in: CGRect(x: 17.5, y: 4.5, width: 4.25, height: 13.25), cornerSize: CGSize(width: 1.1, height: 1.1))
-            line(CGPoint(x: 9, y: 14), CGPoint(x: 9, y: 17.3))
-            line(CGPoint(x: 6, y: 17.6), CGPoint(x: 12, y: 17.6))
-            line(CGPoint(x: 18.9, y: 7.4), CGPoint(x: 20.35, y: 7.4))
-        }
-        return path.applying(CGAffineTransform(scaleX: rect.width / 24, y: rect.height / 24))
     }
 }
 
@@ -246,8 +211,10 @@ private final class RingView: NSView {
             layer?.addSublayer(shape)
         }
         let path = CGMutablePath()
-        path.addArc(center: CGPoint(x: 18, y: 18), radius: 16.5,
-                    startAngle: .pi / 2, endAngle: -.pi / 9, clockwise: true)
+        let center = CGPoint(x: 17.9793732, y: 18.0000129)
+        path.addArc(center: center, radius: 16.5,
+                    startAngle: atan2(34.5 - center.y, 18 - center.x),
+                    endAngle: atan2(12.4 - center.y, 33.5 - center.x), clockwise: true)
         arc.path = path
         arc.lineCap = .round
         updateColors()
@@ -286,7 +253,7 @@ private final class RingView: NSView {
 }
 
 // Template images preserve the approved vector geometry while the system supplies tint
-private func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
+func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
     let size = name == "battery" ? NSSize(width: 26, height: 22) : NSSize(width: 22, height: 22)
     let image = NSImage(size: size, flipped: true) { _ in
         guard let context = NSGraphicsContext.current?.cgContext else { return false }
@@ -315,6 +282,32 @@ private func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
             line(CGPoint(x: 25, y: 10.3), CGPoint(x: 25, y: 13.7), width: 1.6)
             context.setAlpha(1)
             if battery > 0 { rounded(CGRect(x: 3.9, y: 8.9, width: 17.25 * Double(battery) / 100, height: 6.2), 1.5) }
+        } else if name == "iphone" {
+            rounded(CGRect(x: 6.75, y: 2.75, width: 10.5, height: 18.5), 2.7, stroke: 1.5)
+            line(CGPoint(x: 10.6, y: 5.5), CGPoint(x: 13.4, y: 5.5), width: 1.6)
+        } else if name == "laptopcomputer" {
+            rounded(CGRect(x: 4, y: 5, width: 16, height: 11), 1.6, stroke: 1.5)
+            line(CGPoint(x: 1.9, y: 18.7), CGPoint(x: 22.1, y: 18.7), width: 1.7)
+        } else if name == "appletv" {
+            context.beginPath()
+            context.move(to: CGPoint(x: 6.2, y: 8.2))
+            context.addLine(to: CGPoint(x: 17.8, y: 8.2))
+            context.addLine(to: CGPoint(x: 20.2, y: 11.8))
+            context.addLine(to: CGPoint(x: 20.2, y: 16.2))
+            context.addArc(center: CGPoint(x: 18.4, y: 16.2), radius: 1.8, startAngle: 0, endAngle: .pi / 2, clockwise: false)
+            context.addLine(to: CGPoint(x: 5.6, y: 18))
+            context.addArc(center: CGPoint(x: 5.6, y: 16.2), radius: 1.8, startAngle: .pi / 2, endAngle: .pi, clockwise: false)
+            context.addLine(to: CGPoint(x: 3.8, y: 11.8))
+            context.closePath()
+            context.setLineWidth(1.5)
+            context.strokePath()
+            line(CGPoint(x: 3.8, y: 11.8), CGPoint(x: 20.2, y: 11.8), width: 1.5)
+        } else if name == "pc" {
+            rounded(CGRect(x: 2.5, y: 4.5, width: 13, height: 9.5), 1.4, stroke: 1.5)
+            rounded(CGRect(x: 17.5, y: 4.5, width: 4.25, height: 13.25), 1.1, stroke: 1.5)
+            line(CGPoint(x: 9, y: 14), CGPoint(x: 9, y: 17.3), width: 1.5)
+            line(CGPoint(x: 6, y: 17.6), CGPoint(x: 12, y: 17.6), width: 1.5)
+            line(CGPoint(x: 18.9, y: 7.4), CGPoint(x: 20.35, y: 7.4), width: 1.4)
         } else if name == "warning" {
             context.setLineWidth(1.5)
             context.strokeEllipse(in: CGRect(x: 3.25, y: 3.25, width: 17.5, height: 17.5))

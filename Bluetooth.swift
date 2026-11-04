@@ -57,6 +57,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     private var replies: [Packet] = []
     private var infoRequests: [[UInt8]: Date] = [:]
     private var readings: [[UInt8]: DeviceReading] = [:]
+    private var receivedPacket = false
     var onDevice: ((DeviceReading) -> Void)?
     var onBattery: ((Int) -> Void)?
     var onClose: (() -> Void)?
@@ -152,21 +153,29 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     // Check during the polling pause too, so a late connected reply finishes immediately
-    func waitUntilConnected(_ address: [UInt8], since began: Date, timeout: TimeInterval = 20) -> ActionResult {
+    func waitUntilConnected(_ address: [UInt8], since began: Date, timeout: TimeInterval = 20,
+                            cancelled: () -> Bool = { false }, reopen: () -> BmapLink? = { nil }) -> ActionResult {
         let deadline = Date(timeIntervalSinceNow: timeout)
-        while isOpen && Date() < deadline {
-            let requestedAt = Date()
-            requestInfo(address)
-            _ = wait(min(1, deadline.timeIntervalSinceNow)) {
-                if self.connectionResult(address, since: began) != nil { return true }
-                return (self.readings[address]?.requestedAt ?? .distantPast) >= requestedAt ? true : nil
+        var observer = self
+        while !cancelled() && Date() < deadline {
+            if !observer.isOpen {
+                guard let replacement = reopen(), replacement.isOpen else { return .timeout }
+                observer = replacement
             }
-            if let result = connectionResult(address, since: began) { return result }
-            if let result = wait(min(0.15, deadline.timeIntervalSinceNow), until: {
-                self.connectionResult(address, since: began)
+            let requestedAt = Date()
+            observer.requestInfo(address)
+            let answered: Bool? = observer.wait(min(observer.receivedPacket ? 1 : 3, deadline.timeIntervalSinceNow), yielding: cancelled) {
+                if observer.connectionResult(address, since: began) != nil { return true }
+                return (observer.readings[address]?.requestedAt ?? .distantPast) >= requestedAt ? true : nil
+            }
+            if cancelled() { observer.close(); return .timeout }
+            if let result = observer.connectionResult(address, since: began) { return result }
+            if answered == nil { observer.close(); continue }
+            if let result = observer.wait(min(0.15, deadline.timeIntervalSinceNow), yielding: cancelled, until: {
+                observer.connectionResult(address, since: began)
             }) { return result }
         }
-        close()
+        observer.close()
         return .timeout
     }
 
@@ -220,6 +229,7 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             let end = 4 + Int(unread[3])
             guard unread.count >= end else { break }
             let packet = Packet(function: unread[1], operation: unread[2] & 0x0F, payload: Array(unread[4 ..< end]), block: unread[0])
+            receivedPacket = true
             if let level = packet.batteryLevel { onBattery?(level) }
             if packet.block == deviceManagement {
                 if packet.function == deviceInfo {
@@ -240,9 +250,19 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 }
 
+func findHeadphones(defaults: UserDefaults = .standard,
+                    lookup: (String) -> IOBluetoothDevice? = { IOBluetoothDevice(addressString: $0) },
+                    scan: () -> String? = scanHeadphones) -> IOBluetoothDevice? {
+    if let saved = defaults.string(forKey: "headphones"),
+       let device = lookup(saved), device.isPaired() { return device }
+    defaults.removeObject(forKey: "headphones")
+    guard let address = scan(), let device = lookup(address) else { return nil }
+    defaults.set(address, forKey: "headphones")
+    return device
+}
+
 // pairedDevices breaks isConnected in this process, so scan in a child only
-func findHeadphones() -> IOBluetoothDevice? {
-    if let saved = UserDefaults.standard.string(forKey: "headphones") { return IOBluetoothDevice(addressString: saved) }
+private func scanHeadphones() -> String? {
     let scan = Process()
     let output = Pipe()
     scan.executableURL = Bundle.main.executableURL
@@ -250,10 +270,10 @@ func findHeadphones() -> IOBluetoothDevice? {
     scan.standardOutput = output
     guard (try? scan.run()) != nil else { return nil }
     scan.waitUntilExit()
+    guard scan.terminationStatus == 0 else { return nil }
     let address = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !address.isEmpty else { return nil }
-    UserDefaults.standard.set(address, forKey: "headphones")
-    return IOBluetoothDevice(addressString: address)
+    return address
 }
 
 func macAddress() -> [UInt8] {

@@ -1,6 +1,11 @@
 import Foundation
 import IOBluetooth
 
+final class FakeHeadphones: IOBluetoothDevice {
+    var paired = true
+    override func isPaired() -> Bool { paired }
+}
+
 final class FakeChannel: IOBluetoothRFCOMMChannel {
     var opened = true
     weak var receiver: BmapLink?
@@ -49,7 +54,138 @@ struct BehaviorTests {
         testConnectionPolling()
         testListValidationAndEarlyOrder()
         testHostDisconnectFailure()
-        print("Passed 12 hardware-free behavior checks")
+        testEarlyPanelPlacement()
+        testLostConnectionPoll()
+        testColdConnectionPoll()
+        testReadingExpiry()
+        testPowerBoundary()
+        testStableRediscovery()
+        testDistinctNames()
+        testReplacementDiscovery()
+        print("Passed 20 hardware-free behavior checks")
+    }
+
+    // Test that forgetting a cached pair discovers its replacement but an offline pair stays selected
+    static func testReplacementDiscovery() {
+        let suite = "headphone-discovery-test-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("old", forKey: "headphones")
+        let old = FakeHeadphones()
+        let replacement = FakeHeadphones()
+        var scans = 0
+        let lookup: (String) -> IOBluetoothDevice? = { $0 == "old" ? old : replacement }
+        let scan: () -> String? = { scans += 1; return "replacement" }
+        precondition(findHeadphones(defaults: defaults, lookup: lookup, scan: scan) === old && scans == 0)
+        old.paired = false
+        precondition(findHeadphones(defaults: defaults, lookup: lookup, scan: scan) === replacement && scans == 1)
+        precondition(defaults.string(forKey: "headphones") == "replacement")
+        precondition(findHeadphones(defaults: defaults, lookup: lookup, scan: scan) === replacement && scans == 1)
+    }
+
+    // Test that a replacement channel allows the measured first-reply handshake delay
+    static func testColdConnectionPoll() {
+        let channel = FakeChannel()
+        let link = BmapLink(channel: channel)
+        channel.onWrite = { bytes in
+            if bytes[1] == deviceInfo {
+                channel.reply(deviceInfo, status, phone + [1, 0, 0] + Array("Phone".utf8), after: 2.1)
+            }
+        }
+        precondition(link.waitUntilConnected(phone, since: Date(), timeout: 2.5) == .confirmed)
+        precondition(channel.writes.count == 1)
+    }
+
+    // Test that startup anchors are rejected and valid panels remain within either screen
+    static func testEarlyPanelPlacement() {
+        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let visible = CGRect(x: 0, y: 40, width: 1920, height: 1010)
+        let size = CGSize(width: 256, height: 347)
+        precondition(panelOrigin(anchor: .zero, screen: screen, visible: visible, size: size) == nil)
+        precondition(panelOrigin(anchor: CGRect(x: 0, y: -100, width: 38, height: 24), screen: screen, visible: visible, size: size) == nil)
+        for anchorHeight in [CGFloat(12), 24] {
+            let point = panelOrigin(anchor: CGRect(x: 1900, y: 1053, width: 18, height: anchorHeight), screen: screen, visible: visible, size: size)!
+            precondition(point == CGPoint(x: 1656, y: 1042))
+        }
+        let secondary = CGRect(x: -1920, y: -200, width: 1920, height: 1080)
+        let secondaryVisible = CGRect(x: -1920, y: -200, width: 1920, height: 1050)
+        precondition(panelOrigin(anchor: CGRect(x: -300, y: 853, width: 38, height: 24), screen: secondary, visible: secondaryVisible, size: size) == CGPoint(x: -300, y: 842))
+        let anchor = CGRect(x: 1700, y: 1053, width: 38, height: 24)
+        precondition(panelOrigin(anchor: anchor, screen: screen, visible: screen, size: size)?.y == 1042)
+        precondition(panelOrigin(anchor: anchor, screen: screen, visible: CGRect(x: 0, y: 0, width: 1920, height: 1043), size: size)?.y == 1035)
+    }
+
+    // Test that one lost poll resumes on a fresh channel without resending Connect
+    static func testLostConnectionPoll() {
+        let lost = FakeChannel()
+        let first = BmapLink(channel: lost)
+        lost.onWrite = { bytes in
+            if bytes[1] == connect { lost.reply(connect, processing, phone) }
+        }
+        precondition(first.request(connect, start, [0] + phone)?.operation == processing)
+        let replacement = FakeChannel()
+        let second = BmapLink(channel: replacement)
+        replacement.onWrite = { bytes in
+            if bytes[1] == deviceInfo { replacement.reply(deviceInfo, status, phone + [1, 0, 0] + Array("Phone".utf8)) }
+        }
+        let began = Date()
+        var reopenCount = 0
+        let result = first.waitUntilConnected(phone, since: began, timeout: 3, reopen: {
+            precondition(!first.isOpen)
+            reopenCount += 1
+            return second
+        })
+        precondition(result == .confirmed && reopenCount == 1)
+        precondition(Date().timeIntervalSince(began) < 1.3)
+        precondition((lost.writes + replacement.writes).filter { $0[1] == connect }.count == 1)
+        print("Lost connection poll recovered seconds", Date().timeIntervalSince(began))
+    }
+
+    // Test that a closed-panel observation gap cannot authenticate an old connection flag
+    static func testReadingExpiry() {
+        var state = DeviceState()
+        let began = Date()
+        state.merge(DeviceReading(device: PairedDevice(address: phone, name: "Phone", connected: true), requestedAt: began))
+        precondition(state.isFresh(phone, at: began.addingTimeInterval(4)))
+        precondition(!state.isFresh(phone, at: began.addingTimeInterval(6)))
+        state.confirm(phone, connected: true, at: began)
+        state.invalidateReadings()
+        state.merge(DeviceReading(device: PairedDevice(address: phone, name: "Phone"), requestedAt: began.addingTimeInterval(1)))
+        precondition(!state.devices[0].connected)
+    }
+
+    // Test that old callbacks and queued actions stay invalid after power returns
+    static func testPowerBoundary() {
+        let session = WorkSession()
+        session.begin(available: true)
+        let queued = session.current
+        precondition(session.accepts(queued))
+        session.begin(available: false)
+        precondition(!session.accepts(queued) && !session.accepts(session.current))
+        session.begin(available: true)
+        precondition(!session.accepts(queued) && session.accepts(session.current))
+    }
+
+    // Test that learning television names cannot move rows on an unchanged list
+    static func testStableRediscovery() {
+        var state = DeviceState()
+        let television: [UInt8] = [0, 1, 2, 3, 4, 5]
+        state.reconcileOrder([phone, computer, television], computer: computer)
+        for device in [PairedDevice(address: television, name: "TV"), PairedDevice(address: phone, name: "Phone"), PairedDevice(address: computer, name: "Computer")] {
+            state.merge(DeviceReading(device: device, requestedAt: Date()))
+        }
+        let previous = state.devices
+        state.reconcileOrder([television, phone, computer], computer: computer)
+        precondition(state.devices == previous && state.devices.map(\.address) == [computer, phone, television])
+    }
+
+    // Test that colliding or empty shortened names retain their full identity
+    static func testDistinctNames() {
+        var state = DeviceState()
+        state.devices = [PairedDevice(address: phone, name: "Alice’s iPhone"), PairedDevice(address: computer, name: "Bob's iPhone")]
+        precondition(state.devices.map { state.displayName(for: $0) } == ["Alice’s iPhone", "Bob's iPhone"])
+        precondition(PairedDevice(address: phone, name: "Sam’s  ").displayName == "Sam’s  ")
+        precondition(PairedDevice(address: phone, name: "李’s Phone").displayName == "Phone")
     }
 
     // Test that processing and error prefixes do not become part of the device address
