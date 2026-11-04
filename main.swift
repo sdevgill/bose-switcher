@@ -3,7 +3,7 @@ import SwiftUI
 import IOBluetooth
 import CoreBluetooth
 
-final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItemExpandedInterfaceDelegate, ObservableObject, CBCentralManagerDelegate {
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, ObservableObject, CBCentralManagerDelegate {
     private(set) var state = DeviceState()
     @Published var actions: [[UInt8]: RowAction] = [:]
     @Published var macConnected = false
@@ -20,6 +20,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
     private let panel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var panelTopLeft = NSPoint.zero
     private var placementTimer: Timer?
+    private var outsideClickMonitor: Any?
 
     private let bluetooth = BluetoothThread()
     private let session = WorkSession()
@@ -64,8 +65,6 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             button.image = switcherIcon()
             button.setAccessibilityLabel("Bose Switcher")
         }
-        statusItem.expandedInterfaceDelegate = self
-        // AXPress still uses target/action instead of starting a native session
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
         statusItem.button?.toolTip = "Bose Switcher"
@@ -90,21 +89,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         central = CBCentralManager(delegate: self, queue: .main)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(otherAppActivated), name: NSWorkspace.didActivateApplicationNotification, object: nil)
     }
 
+    // Runs on every status item click and on AXPress, so a second click closes the panel
     @objc private func togglePanel() {
-        if let session = statusItem.expandedInterfaceSession { session.cancel(); return }
         if placementTimer != nil && !panelShown { placementTimer?.invalidate(); placementTimer = nil; return }
         if panelShown { hidePanel(); return }
         openPanel()
-    }
-
-    func statusItem(_ statusItem: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
-        openPanel()
-    }
-
-    func statusItemDidEndExpandedInterfaceSession(_ statusItem: NSStatusItem, animated: Bool) {
-        hidePanel()
     }
 
     private func openPanel() {
@@ -118,7 +110,6 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             if Date() >= deadline {
                 timer.invalidate()
                 self.placementTimer = nil
-                if !self.panelShown { self.statusItem.expandedInterfaceSession?.cancel() }
             }
         }
     }
@@ -141,6 +132,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         panel.orderFrontRegardless()
         panel.invalidateShadow()
         statusItem.button?.toolTip = nil
+        // The button clears its own highlight when the click ends, so set it after that
+        DispatchQueue.main.async { if self.panelShown { self.statusItem.button?.highlight(true) } }
+        // Clicks in other apps or the menu bar never reach this app, so watch for them globally
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            self?.hidePanel()
+        }
         showPanel()
     }
 
@@ -151,11 +148,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         if panelShown { panel.setFrameTopLeftPoint(panelTopLeft) }
     }
 
-    func windowDidResignKey(_ notification: Notification) {
-        // Let native tracking handle a second status-item click before cancelling its session
-        // AXPress opens without a session, so it still needs focus-based dismissal
-        if statusItem.expandedInterfaceSession == nil { hidePanel() }
-    }
+    @objc private func otherAppActivated(_ notification: Notification) { hidePanel() }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !terminating { beginTermination { sender.reply(toApplicationShouldTerminate: true) } }
@@ -252,11 +245,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
     func hidePanel() {
         placementTimer?.invalidate()
         placementTimer = nil
-        // AppKit clears the session before sending its dismissal callback
-        statusItem.expandedInterfaceSession?.cancel()
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        outsideClickMonitor = nil
         guard panelShown else { return }
         panelShown = false
         panel.orderOut(nil)
+        statusItem.button?.highlight(false)
         statusItem.button?.toolTip = "Bose Switcher"
         panelTimer?.invalidate()
         panelTimer = nil
