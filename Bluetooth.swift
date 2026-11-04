@@ -291,9 +291,31 @@ func scanHeadphones(timeout: TimeInterval = 3, cancelled: () -> Bool = { false }
     return address
 }
 
+// Skip repeated scans while no headphones are paired, since each scan starts a process
+final class ScanBackoff {
+    private var nextScan: TimeInterval = 0
+
+    func run(delay: TimeInterval = 10, cancelled: () -> Bool, _ scan: () -> String?) -> String? {
+        guard ProcessInfo.processInfo.systemUptime >= nextScan else { return nil }
+        let address = scan()
+        if address == nil && !cancelled() { nextScan = ProcessInfo.processInfo.systemUptime + delay }
+        return address
+    }
+}
+
+// Only the Bluetooth thread scans
+let headphoneScans = ScanBackoff()
+
+private let hostAddressLock = NSLock()
+private var hostAddressCache: [UInt8] = []
+
+// The controller address never changes, so read it once instead of on every refresh
 func macAddress() -> [UInt8] {
+    if let cached = hostAddressLock.withLock({ hostAddressCache.isEmpty ? nil : hostAddressCache }) { return cached }
     let text = IOBluetoothHostController.default()?.addressAsString() ?? ""
-    return text.split(separator: ":").compactMap { UInt8($0, radix: 16) }
+    let address = text.split(separator: ":").compactMap { UInt8($0, radix: 16) }
+    if address.count == 6 { hostAddressLock.withLock { hostAddressCache = address } }
+    return address
 }
 
 // Run jobs in the default run-loop mode required by IOBluetooth callbacks

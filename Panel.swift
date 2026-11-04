@@ -49,8 +49,19 @@ struct SwitcherPanel: View {
             .padding(.horizontal, 10)
 
             if let status = app.bluetoothStatus {
-                Text(status).font(.system(size: 12, weight: .regular)).fontWeight(.regular)
-                    .foregroundStyle(PanelStyle.secondary).padding(10)
+                if let settings = app.bluetoothSettingsURL {
+                    // Blocked or off Bluetooth needs System Settings, so link straight to it
+                    Button { NSWorkspace.shared.open(settings); app.hidePanel() } label: {
+                        Text(status).font(.system(size: 12, weight: .regular)).fontWeight(.regular)
+                            .foregroundStyle(PanelStyle.accentText)
+                            .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                            .padding(.horizontal, 10).contentShape(Rectangle())
+                    }
+                    .buttonStyle(DeviceButtonStyle())
+                } else {
+                    Text(status).font(.system(size: 12, weight: .regular)).fontWeight(.regular)
+                        .foregroundStyle(PanelStyle.secondary).padding(10)
+                }
             } else if app.macConnected {
                 Text("Devices").font(.system(size: 11, weight: .semibold)).fontWeight(.semibold)
                     .foregroundStyle(PanelStyle.faint).frame(height: 22).padding(.horizontal, 10)
@@ -309,8 +320,19 @@ private final class RingView: NSView {
     }
 }
 
+private var symbolCache: [String: NSImage] = [:]
+
 // Template images let the system tint the artwork
+// Cached so SwiftUI keeps the same image across updates instead of redrawing it
 func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
+    let key = name == "battery" ? "battery\(battery)" : name
+    if let cached = symbolCache[key] { return cached }
+    let image = drawSymbol(name, battery: battery)
+    symbolCache[key] = image
+    return image
+}
+
+private func drawSymbol(_ name: String, battery: Int) -> NSImage {
     let size = name == "battery" ? NSSize(width: 26, height: 22) : NSSize(width: 22, height: 22)
     let image = NSImage(size: size, flipped: true) { _ in
         guard let context = NSGraphicsContext.current?.cgContext else { return false }
@@ -342,6 +364,9 @@ func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
         } else if name == "iphone" {
             rounded(CGRect(x: 6.75, y: 2.75, width: 10.5, height: 18.5), 2.7, stroke: 1.5)
             line(CGPoint(x: 10.6, y: 5.5), CGPoint(x: 13.4, y: 5.5), width: 1.6)
+        } else if name == "ipad" {
+            rounded(CGRect(x: 4.25, y: 3.25, width: 15.5, height: 17.5), 2.4, stroke: 1.5)
+            line(CGPoint(x: 10.6, y: 17.9), CGPoint(x: 13.4, y: 17.9), width: 1.4)
         } else if name == "laptopcomputer" {
             rounded(CGRect(x: 4, y: 5, width: 16, height: 11), 1.6, stroke: 1.5)
             line(CGPoint(x: 1.9, y: 18.7), CGPoint(x: 22.1, y: 18.7), width: 1.7)
@@ -403,7 +428,7 @@ func referenceSymbol(_ name: String, battery: Int = 100) -> NSImage {
 }
 
 func switcherIcon() -> NSImage {
-    let image = referenceSymbol("switcher")
+    let image = drawSymbol("switcher", battery: 100)
     image.accessibilityDescription = "Bose Switcher"
     return image
 }

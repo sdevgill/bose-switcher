@@ -48,6 +48,7 @@ struct BehaviorTests {
         testBatteryReply()
         testConfirmedState()
         testMissingDevicesAndOrder()
+        testDeviceSymbols()
         testActionPriority()
         testFirstConfirmationAndFreshness()
         testAuthoritativeMembership()
@@ -68,7 +69,7 @@ struct BehaviorTests {
         testScanLifetime()
         testScanActionPriority()
         testCancelledWaits()
-        print("Passed 24 hardware-free behavior checks")
+        print("Passed 25 hardware-free behavior checks")
     }
 
     // Test that successful scans return output and timed-out or cancelled children are killed
@@ -313,6 +314,14 @@ struct BehaviorTests {
         precondition(state.devices.map(\.address) == [phone, computer])
         precondition(state.devices[1].connected)
         precondition(state.devices.map(\.symbol) == ["iphone", "laptopcomputer"])
+    }
+
+    // Test that common device names get a matching icon and unknown names fall back to a desktop
+    static func testDeviceSymbols() {
+        let names = ["Alice’s iPhone": "iphone", "Pixel 9": "iphone", "Galaxy Tab S9": "ipad", "iPad Air": "ipad",
+                     "iMac": "pc", "Mac mini": "pc", "Bob's MacBook Air": "laptopcomputer", "Living Room TV": "appletv",
+                     "Gaming Rig": "pc"]
+        for (name, symbol) in names { precondition(PairedDevice(address: phone, name: name).symbol == symbol, name) }
     }
 
     // Test that a queued action interrupts a refresh wait without nesting any jobs

@@ -46,7 +46,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
 
     init(hostAddress: @escaping () -> [UInt8] = macAddress,
          discoverHeadphones: @escaping (() -> Bool) -> IOBluetoothDevice? = { cancelled in
-             findHeadphones(scan: { scanHeadphones(cancelled: cancelled) })
+             findHeadphones(scan: { headphoneScans.run(cancelled: cancelled) { scanHeadphones(cancelled: cancelled) } })
          },
          makeStatusItem: @escaping () -> NSStatusItem = { NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength) }) {
         self.hostAddress = hostAddress
@@ -94,6 +94,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(otherAppActivated), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        // A display change can move the item, so close rather than leave the panel in the wrong place
+        NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 
     // A real click starts a session, which keeps the item highlighted while the panel is open
@@ -118,8 +120,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         let deadline = Date(timeIntervalSinceNow: 2)
         placementTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
-            if self.positionPanel(), !self.panelShown { self.presentPanel() }
-            if Date() >= deadline {
+            let previous = self.panelTopLeft
+            let placed = self.positionPanel()
+            if placed && !self.panelShown { self.presentPanel() }
+            // Stop once the item has settled so the timer does not run for the full deadline
+            if placed && self.panelShown && self.panelTopLeft == previous {
+                timer.invalidate()
+                self.placementTimer = nil
+            } else if Date() >= deadline {
                 timer.invalidate()
                 self.placementTimer = nil
                 if !self.panelShown { self.hidePanel() }
@@ -170,6 +178,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         if app != frontApp { hidePanel() }
     }
 
+    @objc private func screensChanged() { hidePanel() }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !terminating { beginTermination { sender.reply(toApplicationShouldTerminate: true) } }
         return .terminateLater
@@ -210,13 +220,22 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             bluetoothStatus = nil
             requestRefresh(list: state.devices.isEmpty)
         case .unauthorized:
-            bluetoothStatus = "Allow Bluetooth in System Settings"
+            bluetoothStatus = "Allow Bluetooth in System Settings…"
         case .poweredOff:
-            bluetoothStatus = "Bluetooth is turned off"
+            bluetoothStatus = "Turn on Bluetooth…"
             macConnected = false
             batteryPercent = nil
         case .unsupported: bluetoothStatus = "Bluetooth is unavailable"
         default: bluetoothStatus = CBManager.authorization == .notDetermined ? "Allow Bluetooth access…" : "Loading Bluetooth…"
+        }
+    }
+
+    // Settings page for a status the user has to fix outside the app
+    var bluetoothSettingsURL: URL? {
+        switch central?.state {
+        case .unauthorized: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")
+        case .poweredOff: URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")
+        default: nil
         }
     }
 

@@ -15,10 +15,14 @@ struct PairedDevice: Codable, Identifiable, Equatable {
         return name
     }
 
+    // Guess the device type from its Bluetooth name, falling back to a desktop
     var symbol: String {
-        if name.localizedCaseInsensitiveContains("iPhone") { return "iphone" }
-        if name.localizedCaseInsensitiveContains("Mac") { return "laptopcomputer" }
-        if name.localizedCaseInsensitiveContains("TV") { return "appletv" }
+        func has(_ words: String...) -> Bool { words.contains { name.localizedCaseInsensitiveContains($0) } }
+        if has("iPad", "Galaxy Tab", "Tablet") { return "ipad" }
+        if has("Phone", "Pixel", "Galaxy", "OnePlus", "Xperia") { return "iphone" }
+        if has("iMac", "Mac mini", "Mac Studio", "Mac Pro", "Desktop") { return "pc" }
+        if has("Mac", "Laptop", "ThinkPad", "Surface") { return "laptopcomputer" }
+        if has("TV") { return "appletv" }
         return "pc"
     }
 }
