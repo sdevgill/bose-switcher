@@ -9,8 +9,9 @@ private enum PanelStyle {
     static let accent = color(0x0a7aff, 0x0a84ff)
     static let accentText = color(0x0a64d6, 0x6ab3ff)
     static let circle = color(0x000000, 0xffffff, lightAlpha: 0.07, darkAlpha: 0.12)
-    static let line = color(0x000000, 0xffffff, lightAlpha: 0.09, darkAlpha: 0.10)
-    static let glass = color(0xffffff, 0x000000, lightAlpha: 0.40, darkAlpha: 0.35)
+    static let line = color(0x000000, 0xffffff, lightAlpha: 0.09, darkAlpha: 0.15)
+    // Untinted glass in dark mode matches CleanShot's menu grey (#2a2a2a)
+    static let glass = color(0xffffff, 0x000000, lightAlpha: 0.40, darkAlpha: 0)
     static let shadow = color(0x142448, 0x000000, lightAlpha: 0.34, darkAlpha: 0.70)
 
     private static func color(_ light: UInt32, _ dark: UInt32, lightAlpha: CGFloat = 1, darkAlpha: CGFloat = 1) -> Color {
