@@ -65,15 +65,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         if let data = UserDefaults.standard.data(forKey: "devices") {
             state.devices = PairedDevice.cached(data)
         }
-        if let button = statusItem.button {
-            button.image = switcherIcon()
-            button.setAccessibilityLabel("Bose Switcher")
-        }
-        // The menu bar system owns clicks, keyboard navigation and the highlight through this session
-        statusItem.expandedInterfaceDelegate = self
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(togglePanel)
-        statusItem.button?.toolTip = "Bose Switcher"
+        configureStatusItem()
         panel.delegate = self
         panel.level = .popUpMenu
         panel.backgroundColor = .clear
@@ -100,13 +92,27 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 
-    // A real click starts a session, which keeps the item highlighted while the panel is open
+    private func configureStatusItem() {
+        if let button = statusItem.button {
+            button.image = switcherIcon()
+            button.setAccessibilityLabel("Bose Switcher")
+        }
+        // Primary clicks use the menu bar session for keyboard navigation and the native highlight
+        statusItem.expandedInterfaceDelegate = self
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePanel)
+        // MenuBarAgent forwards right clicks and control-clicks to the button as right clicks
+        statusItem.button?.sendAction(on: [.rightMouseDown])
+        statusItem.button?.toolTip = "Bose Switcher"
+    }
+
+    // A primary click starts a session, which keeps the item highlighted while the panel is open
     func statusItem(_ statusItem: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
         if monotonicNow() < ignoreSessionUntil { session.cancel(); return }
         openPanel()
     }
 
-    // Real clicks go through the session, so only accessibility presses reach this action
+    // Primary clicks use the session, while secondary clicks and accessibility use target/action
     @objc private func togglePanel() {
         if panelShown || placementTimer != nil { hidePanel() } else { openPanel() }
     }
@@ -132,11 +138,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         }
     }
 
-    private func positionPanel() -> Bool {
-        guard let button = statusItem.button, let window = button.window else { return false }
+    private var itemFrame: NSRect? {
+        guard let button = statusItem.button, let window = button.window else { return nil }
         var anchor = window.convertToScreen(button.convert(button.bounds, to: nil))
         let accessible = button.accessibilityFrame()
         if abs(accessible.midX - anchor.midX) < 2 { anchor.origin.x = accessible.minX }
+        return anchor
+    }
+
+    private func positionPanel() -> Bool {
+        guard let anchor = itemFrame else { return false }
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: anchor.midX, y: anchor.midY)) }),
               let origin = panelOrigin(anchor: anchor, screen: screen.frame, visible: screen.visibleFrame,
                                        size: PanelLayout.contentSize(in: panel.frame.size)) else { return false }
@@ -153,13 +164,21 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         // Clicks outside the panel, including a second click on the item, go to other processes
         // The session ends on neither, so the app closes the panel itself
         frontApp = NSWorkspace.shared.frontmostApplication
-        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            guard let self else { return }
-            // Without a session, a click on the item would start one and reopen the panel
-            if self.statusItem.expandedInterfaceSession == nil { self.ignoreSessionUntil = monotonicNow().addingTimeInterval(0.5) }
-            self.hidePanel()
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+            self?.dismissPanelForOutsideClick(event)
         }
         showPanel()
+    }
+
+    private func dismissPanelForOutsideClick(_ event: NSEvent) {
+        // Global monitor events have no local window and already use AppKit screen coordinates
+        let onItem = itemFrame?.insetBy(dx: -2, dy: -2).contains(event.locationInWindow) ?? false
+        // Right clicks and control-clicks on the item also reach the button action, which toggles the panel
+        let secondary = event.type == .rightMouseDown || (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+        if secondary && onItem { return }
+        // Without a session, a click on the item would start one and reopen the panel
+        if statusItem.expandedInterfaceSession == nil { ignoreSessionUntil = monotonicNow().addingTimeInterval(0.5) }
+        hidePanel()
     }
 
     private func resizePanel(_ size: CGSize) {

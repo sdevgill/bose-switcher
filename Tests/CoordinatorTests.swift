@@ -6,9 +6,30 @@ final class ExpandedInterfaceSession: NSStatusItemExpandedInterfaceSession {
     override func cancel() { onCancel?() }
 }
 
+final class SessionStatusButton: NSStatusBarButton {
+    override func accessibilityFrame() -> NSRect {
+        guard let window else { return .zero }
+        return window.convertToScreen(convert(bounds, to: nil))
+    }
+}
+
 final class SessionStatusItem: NSStatusItem {
+    let statusButton = SessionStatusButton(frame: .zero)
+    var statusWindow: NSWindow?
     var activeSession: NSStatusItemExpandedInterfaceSession?
+    override var button: NSStatusBarButton? { statusButton }
     override var expandedInterfaceSession: NSStatusItemExpandedInterfaceSession? { activeSession }
+
+    func placeButton(at frame: NSRect) {
+        if statusWindow == nil {
+            let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView?.addSubview(statusButton)
+            statusWindow = window
+        }
+        statusWindow?.setFrame(frame, display: false)
+        statusButton.frame = NSRect(origin: .zero, size: frame.size)
+    }
 }
 
 final class BorrowedHeadphones: IOBluetoothDevice {
@@ -110,13 +131,20 @@ struct CoordinatorTests {
         testTerminationDeadline()
         testPanelToggle()
         testPanelDismissal()
-        testSessionDismissal()
+        testPanelActionMask()
+        testSecondaryItemClick()
+        testMonitorEventLocation()
+        testMovedItemFrame()
+        testControlClick()
+        testOutsideClickDismissal()
+        testPrimaryItemClick()
+        testAccessibilityAfterSessionDismissal()
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 22 coordinator and artwork behavior checks")
+        print("Passed 29 coordinator and artwork behavior checks")
     }
 
-    // Test that a second status item click closes the panel and a third opens it again
+    // Test that a second panel action closes the panel and a third opens it again
     static func testPanelToggle() {
         let app = App(makeStatusItem: { NSStatusItem() })
         app.panel.delegate = app
@@ -150,31 +178,175 @@ struct CoordinatorTests {
         precondition(!app.panelShown && app.panelTimer == nil)
     }
 
-    // Test that closing the panel ends the menu bar session and a click that just closed it cannot reopen it
-    static func testSessionDismissal() {
+    // Test that launch setup sends only right mouse down through the button action
+    static func testPanelActionMask() {
+        let item = SessionStatusItem()
+        let app = App(makeStatusItem: { item })
+        app.configureStatusItem()
+        let mask = item.statusButton.sendAction(on: [])
+        precondition(mask == Int(NSEvent.EventTypeMask.rightMouseDown.rawValue))
+        precondition(item.statusButton.target === app && item.statusButton.action == #selector(App.togglePanel))
+        precondition(item.expandedInterfaceDelegate === app)
+    }
+
+    static func mouseEvent(_ type: NSEvent.EventType, modifiers: NSEvent.ModifierFlags = [],
+                           location: NSPoint, timestamp: TimeInterval = uptime()) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers, timestamp: timestamp,
+                          windowNumber: 0, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+    }
+
+    // Test that right clicks on the item and within its slack leave dismissal to the button action
+    static func testSecondaryItemClick() {
+        let frame = NSRect(x: 100, y: 100, width: 24, height: 24)
+        let locations = [NSPoint(x: frame.midX, y: frame.midY),
+                         NSPoint(x: frame.minX - 1.5, y: frame.midY), NSPoint(x: frame.maxX + 1.5, y: frame.midY),
+                         NSPoint(x: frame.midX, y: frame.minY - 1.5), NSPoint(x: frame.midX, y: frame.maxY + 1.5)]
+        for location in locations {
+            let item = SessionStatusItem()
+            item.placeButton(at: frame)
+            defer { item.statusWindow?.close() }
+            let app = App(makeStatusItem: { item })
+            app.togglePanel()
+            app.showPanel()
+            app.dismissPanelForOutsideClick(mouseEvent(.rightMouseDown, location: location))
+            precondition(app.panelShown && app.placementTimer != nil && app.ignoreSessionUntil == .distantPast,
+                         "item \(String(describing: app.itemFrame)), event \(location)")
+            app.togglePanel()
+            precondition(!app.panelShown && app.placementTimer == nil)
+        }
+    }
+
+    // Test that the monitor uses the recorded screen location even when the cursor has moved elsewhere
+    static func testMonitorEventLocation() {
+        let cursor = NSEvent.mouseLocation
+        let frame = NSRect(x: (cursor.x - 200).rounded(), y: (cursor.y - 200).rounded(), width: 24, height: 24)
+        let item = SessionStatusItem()
+        item.placeButton(at: frame)
+        defer { item.statusWindow?.close() }
+        let app = App(makeStatusItem: { item })
+        app.togglePanel()
+        app.showPanel()
+        let event = mouseEvent(.rightMouseDown, location: NSPoint(x: frame.midX, y: frame.midY))
+        precondition(event.window == nil && app.itemFrame == frame && !frame.contains(cursor),
+                     "window \(String(describing: event.window)), item \(String(describing: app.itemFrame)), frame \(frame), event \(event.locationInWindow)")
+        app.dismissPanelForOutsideClick(event)
+        precondition(app.panelShown && app.placementTimer != nil)
+        app.hidePanel()
+    }
+
+    // Test that hit testing follows a moved status item without moving the panel or accepting the old frame
+    static func testMovedItemFrame() {
+        for atNewFrame in [true, false] {
+            let item = SessionStatusItem()
+            let oldFrame = NSRect(x: 100, y: 100, width: 24, height: 24)
+            let newFrame = NSRect(x: -240, y: 200, width: 24, height: 24)
+            item.placeButton(at: oldFrame)
+            defer { item.statusWindow?.close() }
+            let app = App(makeStatusItem: { item })
+            app.togglePanel()
+            app.showPanel()
+            let panelFrame = app.panel.frame
+            precondition(app.itemFrame == oldFrame)
+            item.placeButton(at: newFrame)
+            let target = atNewFrame ? newFrame : oldFrame
+            app.dismissPanelForOutsideClick(mouseEvent(.rightMouseDown, location: NSPoint(x: target.midX, y: target.midY)))
+            precondition(app.panelShown == atNewFrame && app.panel.frame == panelFrame)
+            app.hidePanel()
+        }
+    }
+
+    // Test that a control-click on the item leaves the toggle to the button action, which macOS sends as a right click
+    static func testControlClick() {
+        for sessionOpen in [true, false] {
+            let item = SessionStatusItem()
+            item.placeButton(at: NSRect(x: 100, y: 100, width: 24, height: 24))
+            defer { item.statusWindow?.close() }
+            let app = App(makeStatusItem: { item })
+            if sessionOpen {
+                let session = ExpandedInterfaceSession()
+                session.onCancel = {
+                    item.activeSession = nil
+                    app.statusItemDidEndExpandedInterfaceSession(item, animated: false)
+                }
+                item.activeSession = session
+                app.statusItem(item, didBegin: session)
+            } else {
+                app.togglePanel()
+            }
+            app.showPanel()
+            app.dismissPanelForOutsideClick(mouseEvent(.leftMouseDown, modifiers: .control, location: NSPoint(x: 112, y: 112)))
+            precondition(app.panelShown && app.ignoreSessionUntil == .distantPast)
+            app.togglePanel()
+            precondition(!app.panelShown && app.placementTimer == nil && item.activeSession == nil)
+            app.togglePanel()
+            precondition(app.placementTimer != nil)
+            app.hidePanel()
+        }
+    }
+
+    // Test that secondary clicks beyond the item slack and other buttons still dismiss the panel
+    static func testOutsideClickDismissal() {
+        let clicks: [(NSEvent.EventType, NSEvent.ModifierFlags, NSPoint)] = [
+            (.rightMouseDown, [], NSPoint(x: 97, y: 112)),
+            (.leftMouseDown, .control, NSPoint(x: 127, y: 112)),
+            (.otherMouseDown, [], NSPoint(x: 112, y: 112)),
+            (.leftMouseDown, .shift, NSPoint(x: 112, y: 112))
+        ]
+        for (type, modifiers, location) in clicks {
+            let item = SessionStatusItem()
+            item.placeButton(at: NSRect(x: 100, y: 100, width: 24, height: 24))
+            defer { item.statusWindow?.close() }
+            let app = App(makeStatusItem: { item })
+            app.togglePanel()
+            app.showPanel()
+            app.dismissPanelForOutsideClick(mouseEvent(type, modifiers: modifiers, location: location))
+            precondition(!app.panelShown && app.placementTimer == nil && app.ignoreSessionUntil > monotonicNow())
+        }
+    }
+
+    // Test that a primary item click closes an action-opened panel and suppresses its session without blocking AXPress
+    static func testPrimaryItemClick() {
+        let item = SessionStatusItem()
+        item.placeButton(at: NSRect(x: 100, y: 100, width: 24, height: 24))
+        defer { item.statusWindow?.close() }
+        let app = App(makeStatusItem: { item })
+        app.togglePanel()
+        app.showPanel()
+        app.dismissPanelForOutsideClick(mouseEvent(.leftMouseDown, location: NSPoint(x: 112, y: 112)))
+        precondition(!app.panelShown && app.placementTimer == nil && app.ignoreSessionUntil > monotonicNow())
+        let session = ExpandedInterfaceSession()
+        var cancellations = 0
+        session.onCancel = { cancellations += 1 }
+        app.statusItem(item, didBegin: session)
+        precondition(cancellations == 1 && !app.panelShown && app.placementTimer == nil)
+        app.togglePanel()
+        precondition(app.placementTimer != nil)
+        app.hidePanel()
+    }
+
+    // Test that session-backed dismissal ends the session and allows AXPress to reopen at once
+    static func testAccessibilityAfterSessionDismissal() {
         let item = SessionStatusItem()
         let app = App(makeStatusItem: { item })
         app.panel.delegate = app
         var cancellations = 0
-        func begin() -> ExpandedInterfaceSession {
-            let session = ExpandedInterfaceSession()
-            session.onCancel = {
-                cancellations += 1
-                item.activeSession = nil
-                app.statusItemDidEndExpandedInterfaceSession(item, animated: false)
-            }
-            item.activeSession = session
-            app.statusItem(item, didBegin: session)
-            return session
+        let session = ExpandedInterfaceSession()
+        session.onCancel = {
+            cancellations += 1
+            item.activeSession = nil
+            app.statusItemDidEndExpandedInterfaceSession(item, animated: false)
         }
-        _ = begin()
+        item.activeSession = session
+        app.statusItem(item, didBegin: session)
         precondition(app.placementTimer != nil)
         app.showPanel()
-        app.hidePanel()
+        app.dismissPanelForOutsideClick(mouseEvent(.leftMouseDown, location: .zero))
         precondition(cancellations == 1 && !app.panelShown && item.activeSession == nil && app.placementTimer == nil)
-        app.ignoreSessionUntil = monotonicNow().addingTimeInterval(0.5)
-        _ = begin()
-        precondition(cancellations == 2 && app.placementTimer == nil && !app.panelShown)
+        precondition(app.ignoreSessionUntil == .distantPast)
+        app.togglePanel()
+        precondition(app.placementTimer != nil)
+        app.togglePanel()
+        precondition(!app.panelShown && app.placementTimer == nil)
     }
 
     // Test that hover draws rounded light and dark fills without changing layout or intercepting clicks
