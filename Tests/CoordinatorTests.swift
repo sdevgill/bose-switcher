@@ -30,6 +30,51 @@ final class BorrowedHeadphones: IOBluetoothDevice {
     }
 }
 
+// A channel that hands writes to the test and can answer like the headphones
+final class ScriptedChannel: IOBluetoothRFCOMMChannel {
+    var opened = true
+    weak var receiver: BmapLink?
+    var onWrite: ((ScriptedChannel, [UInt8]) -> Void)?
+
+    override func isOpen() -> Bool { opened }
+    override func close() -> IOReturn { opened = false; return kIOReturnSuccess }
+    override func setDelegate(_ delegate: Any!) -> IOReturn {
+        receiver = delegate as? BmapLink
+        return kIOReturnSuccess
+    }
+    override func writeSync(_ data: UnsafeMutableRawPointer!, length: UInt16) -> IOReturn {
+        guard opened else { return kIOReturnError }
+        onWrite?(self, Array(UnsafeRawBufferPointer(start: data, count: Int(length))))
+        return kIOReturnSuccess
+    }
+
+    func reply(_ function: UInt8, _ payload: [UInt8]) {
+        Timer.scheduledTimer(withTimeInterval: 0.005, repeats: false) { [self] _ in
+            var bytes = [deviceManagement, function, status, UInt8(payload.count)] + payload
+            bytes.withUnsafeMutableBytes { buffer in
+                receiver?.rfcommChannelData(self, data: buffer.baseAddress!, length: buffer.count)
+            }
+        }
+    }
+}
+
+// Connected headphones whose control channels the test scripts one by one
+final class ScriptedHeadphones: IOBluetoothDevice {
+    var opens = 0
+    var makeChannel: (Int) -> ScriptedChannel = { _ in ScriptedChannel() }
+    override var addressString: String! { "test-headphones" }
+    override var name: String! { "Headphones" }
+    override func isConnected() -> Bool { true }
+    override func openRFCOMMChannelSync(_ rfcommChannel: AutoreleasingUnsafeMutablePointer<IOBluetoothRFCOMMChannel?>!,
+                                        withChannelID channelID: BluetoothRFCOMMChannelID, delegate: Any!) -> IOReturn {
+        let channel = makeChannel(opens)
+        opens += 1
+        channel.receiver = delegate as? BmapLink
+        rfcommChannel.pointee = channel
+        return kIOReturnSuccess
+    }
+}
+
 @main
 struct CoordinatorTests {
     static func settle(_ seconds: TimeInterval = 0.05) {
@@ -46,6 +91,10 @@ struct CoordinatorTests {
         app.session.begin(available: true)
         testCleanupOwnership(app)
         testCleanupReconciliation(app)
+        testLateActionConfirmation()
+        testActionConfirmationBeforeCompletion()
+        testRefusalStays()
+        testUnansweredDisconnectSend()
         testPowerCallbacks(app)
         testListCoalescing(app)
         testBatteryArtwork()
@@ -64,7 +113,7 @@ struct CoordinatorTests {
         testSessionDismissal()
         app.bluetooth.cancel()
         app.bluetooth.async {}
-        print("Passed 18 coordinator and artwork behavior checks")
+        print("Passed 22 coordinator and artwork behavior checks")
     }
 
     // Test that a second status item click closes the panel and a third opens it again
@@ -348,6 +397,132 @@ struct CoordinatorTests {
         app.publishConnection(nil, connected: false, generation: app.session.current)
         settle()
         precondition(!app.macConnected && app.actions[address] == .idle)
+    }
+
+    // Test that only a fresh reading matching the failed command clears its error
+    static func testLateActionConfirmation() {
+        let address: [UInt8] = [1, 2, 3, 4, 5, 6]
+        let other: [UInt8] = [6, 5, 4, 3, 2, 1]
+        for disconnecting in [false, true] {
+            let app = App(makeStatusItem: { NSStatusItem() })
+            app.bluetooth.start()
+            defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+            app.session.begin(available: true)
+            let target = PairedDevice(address: address, name: "Phone", connected: disconnecting)
+            app.updateState { $0.devices = [target] }
+            app.actionPending = true
+            let began = monotonicNow()
+            let generation = app.session.current
+            app.bluetooth.async {
+                app.finish(target, disconnecting: disconnecting, result: .timeout, generation: generation, since: began)
+            }
+            let deadline = uptime() + 1
+            while app.actionPending && uptime() < deadline { settle(0.01) }
+            precondition(!app.actionPending && app.actions[address] == .failed(reason: "No answer"))
+            app.receive(DeviceReading(device: PairedDevice(address: other, name: "Other", connected: !disconnecting), requestedAt: monotonicNow()))
+            precondition(app.actions[address] == .failed(reason: "No answer"))
+            let connected = PairedDevice(address: address, name: "Phone", connected: !disconnecting)
+            app.receive(DeviceReading(device: connected, requestedAt: began.addingTimeInterval(-1)))
+            precondition(app.actions[address] == .failed(reason: "No answer"))
+            app.receive(DeviceReading(device: target, requestedAt: monotonicNow()))
+            precondition(app.actions[address] == .failed(reason: "No answer"))
+            app.receive(DeviceReading(device: connected, requestedAt: monotonicNow()))
+            precondition(app.actions[address] == .idle && app.unconfirmedActions[address] == nil)
+            precondition(app.state.devices.first { $0.address == address }?.connected == !disconnecting)
+        }
+    }
+
+    // Test that a timeout cannot overwrite a reading that already confirmed the action
+    static func testActionConfirmationBeforeCompletion() {
+        let address: [UInt8] = [1, 2, 3, 4, 5, 6]
+        for disconnecting in [false, true] {
+            for fresh in [false, true] {
+                let app = App(makeStatusItem: { NSStatusItem() })
+                app.bluetooth.start()
+                defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+                app.session.begin(available: true)
+                let target = PairedDevice(address: address, name: "Phone", connected: disconnecting)
+                app.updateState { $0.devices = [target] }
+                app.actionPending = true
+                let began = monotonicNow()
+                app.receive(DeviceReading(device: PairedDevice(address: address, name: "Phone", connected: !disconnecting),
+                                          requestedAt: fresh ? monotonicNow() : began.addingTimeInterval(-1)))
+                let generation = app.session.current
+                app.bluetooth.async {
+                    app.finish(target, disconnecting: disconnecting, result: .timeout, generation: generation, since: began)
+                }
+                let deadline = uptime() + 1
+                while app.actionPending && uptime() < deadline { settle(0.01) }
+                precondition(!app.actionPending)
+                precondition(app.actions[address] == (fresh ? .idle : .failed(reason: "No answer")))
+                precondition((app.unconfirmedActions[address] == nil) == fresh)
+            }
+        }
+    }
+
+    // Test that a disconnect whose reply never comes is confirmed by the next reading instead of failing
+    static func testUnansweredDisconnectSend() {
+        let address: [UInt8] = [1, 2, 3, 4, 5, 6]
+        let headphones = ScriptedHeadphones()
+        headphones.makeChannel = { index in
+            let channel = ScriptedChannel()
+            channel.onWrite = { channel, bytes in
+                // The first channel drops while the headphones switch, the next one reports the device gone
+                if index == 0 && bytes[1] == disconnect { channel.opened = false; channel.receiver?.rfcommChannelClosed(channel) }
+                if index > 0 && bytes[1] == deviceInfo { channel.reply(deviceInfo, address + [0, 0, 0] + Array("Phone".utf8)) }
+            }
+            return channel
+        }
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: "deviceCacheHeadphones")
+        defer { defaults.set(previous, forKey: "deviceCacheHeadphones") }
+        defaults.set("test-headphones", forKey: "deviceCacheHeadphones")
+        let app = App(hostAddress: { [6, 5, 4, 3, 2, 1] }, discoverHeadphones: { _ in headphones }, makeStatusItem: { NSStatusItem() })
+        app.bluetooth.start()
+        defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+        app.session.begin(available: true)
+        let target = PairedDevice(address: address, name: "Phone", connected: true)
+        // Already connected, so the fresh reading below is not invalidated by a new Mac connection
+        app.macConnected = true
+        app.updateState {
+            $0.devices = [target]
+            $0.confirm(address, connected: true)
+        }
+        app.actionPending = true
+        let generation = app.session.current
+        app.bluetooth.async(action: true) {
+            app.send(target, disconnecting: true, needsReading: false, cleanupOwner: nil, generation: generation)
+        }
+        let deadline = uptime() + 5
+        while app.actionPending && uptime() < deadline { settle(0.01) }
+        precondition(!app.actionPending && headphones.opens >= 2)
+        precondition(app.actions[address] != .failed(reason: "No answer"))
+        precondition(app.state.devices.first { $0.address == address }?.connected == false)
+    }
+
+    // Test that an explicit refusal stays even when a reading before or after it shows the wanted state
+    static func testRefusalStays() {
+        let address: [UInt8] = [1, 2, 3, 4, 5, 6]
+        for readingFirst in [false, true] {
+            let app = App(makeStatusItem: { NSStatusItem() })
+            app.bluetooth.start()
+            defer { app.bluetooth.cancel(); app.bluetooth.async {} }
+            app.session.begin(available: true)
+            let target = PairedDevice(address: address, name: "Phone")
+            app.updateState { $0.devices = [target] }
+            app.actionPending = true
+            let began = monotonicNow()
+            let connected = PairedDevice(address: address, name: "Phone", connected: true)
+            if readingFirst { app.receive(DeviceReading(device: connected, requestedAt: monotonicNow())) }
+            let generation = app.session.current
+            app.bluetooth.async {
+                app.finish(target, disconnecting: false, result: .refused, generation: generation, since: began)
+            }
+            let deadline = uptime() + 1
+            while app.actionPending && uptime() < deadline { settle(0.01) }
+            if !readingFirst { app.receive(DeviceReading(device: connected, requestedAt: monotonicNow())) }
+            precondition(app.actions[address] == .failed(reason: "Couldn't connect") && app.unconfirmedActions[address] == nil)
+        }
     }
 
     // Test that connection results queued before power-off cannot restore the old state

@@ -163,38 +163,51 @@ final class BmapLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         return list ? addresses : nil
     }
 
-    // Accept connected replies during the polling pause too
-    func waitUntilConnected(_ address: [UInt8], since began: Date, timeout: TimeInterval = 20,
-                            cancelled: () -> Bool = { false }, reopen: () -> BmapLink? = { nil }) -> ActionResult {
+    // Poll Info until the device reaches the wanted connection state, accepting replies during the polling pause too
+    func waitForConnection(_ address: [UInt8], connected: Bool = true, since began: Date, timeout: TimeInterval = 20,
+                           reopenTime: TimeInterval = 3, cancelled: () -> Bool = { false },
+                           reopen: () -> BmapLink? = { nil }) -> ActionResult {
         let deadline = uptime() + timeout
         var observer = self
         while !cancelled() && uptime() < deadline {
             if !observer.isOpen {
-                guard let replacement = reopen(), replacement.isOpen else { return .timeout }
+                // Opening a channel blocks, so do not start one that could run past the deadline
+                guard deadline - uptime() > reopenTime else { break }
+                guard let replacement = reopen(), replacement.isOpen else {
+                    // Multipoint switches can make RFCOMM unavailable for several attempts
+                    observer.pump(min(0.15, max(0, deadline - uptime())))
+                    continue
+                }
                 observer = replacement
             }
+            guard !cancelled(), uptime() < deadline else { break }
             let requestedAt = monotonicNow()
             observer.requestInfo(address)
             let answered: Bool? = observer.wait(min(observer.receivedPacket ? 1 : 3, deadline - uptime()), yielding: cancelled) {
-                if observer.connectionResult(address, since: began) != nil { return true }
+                if observer.connectionResult(address, connected: connected, since: began) != nil { return true }
                 return (observer.readings[address]?.requestedAt ?? .distantPast) >= requestedAt ? true : nil
             }
             if cancelled() { observer.close(); return .timeout }
-            if let result = observer.connectionResult(address, since: began) { return result }
-            if answered == nil { observer.close(); continue }
+            if let result = observer.connectionResult(address, connected: connected, since: began) { return result }
+            if answered == nil {
+                observer.close()
+                observer.pump(min(0.15, max(0, deadline - uptime())))
+                continue
+            }
             if let result = observer.wait(min(0.15, deadline - uptime()), yielding: cancelled, until: {
-                observer.connectionResult(address, since: began)
+                observer.connectionResult(address, connected: connected, since: began)
             }) { return result }
         }
         observer.close()
         return .timeout
     }
 
-    private func connectionResult(_ address: [UInt8], since began: Date) -> ActionResult? {
-        if replies.contains(where: { $0.function == connect && $0.address == address && $0.operation == failed }) {
+    private func connectionResult(_ address: [UInt8], connected: Bool, since began: Date) -> ActionResult? {
+        let command = connected ? connect : disconnect
+        if replies.contains(where: { $0.function == command && $0.address == address && $0.operation == failed }) {
             return .refused
         }
-        if let reading = readings[address], reading.requestedAt >= began, reading.device.connected {
+        if let reading = readings[address], reading.requestedAt >= began, reading.device.connected == connected {
             return .confirmed
         }
         return nil

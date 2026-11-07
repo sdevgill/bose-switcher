@@ -62,6 +62,10 @@ struct BehaviorTests {
         testEarlyPanelPlacement()
         testShadowPlacement()
         testLostConnectionPoll()
+        testConnectionReopenRetries()
+        testConnectionReopenDeadline()
+        testUnansweredDisconnect()
+        testReopenCutoff()
         testColdConnectionPoll()
         testReadingExpiry()
         testPowerBoundary()
@@ -71,7 +75,7 @@ struct BehaviorTests {
         testScanLifetime()
         testScanActionPriority()
         testCancelledWaits()
-        print("Passed 27 hardware-free behavior checks")
+        print("Passed 31 hardware-free behavior checks")
     }
 
     // Test that successful scans return output and timed-out or cancelled children are killed
@@ -127,7 +131,7 @@ struct BehaviorTests {
             case 0: precondition(link.readDevice(phone, cancelled: cancelled) == nil)
             case 1: precondition(link.request(connect, start, [0] + phone, yielding: cancelled) == nil)
             case 2: precondition(link.disconnectHost(computer, cancelled: cancelled, isConnected: { true }) == .timeout)
-            default: precondition(link.waitUntilConnected(phone, since: began, cancelled: cancelled) == .timeout)
+            default: precondition(link.waitForConnection(phone, since: began, cancelled: cancelled) == .timeout)
             }
             precondition(monotonicNow().timeIntervalSince(began) < 0.3 && !link.isOpen)
         }
@@ -174,7 +178,7 @@ struct BehaviorTests {
                 channel.reply(deviceInfo, status, phone + [1, 0, 0] + Array("Phone".utf8), after: 2.1)
             }
         }
-        precondition(link.waitUntilConnected(phone, since: monotonicNow(), timeout: 2.5) == .confirmed)
+        precondition(link.waitForConnection(phone, since: monotonicNow(), timeout: 2.5) == .confirmed)
         precondition(channel.writes.count == 1)
     }
 
@@ -212,7 +216,7 @@ struct BehaviorTests {
         }
         let began = monotonicNow()
         var reopenCount = 0
-        let result = first.waitUntilConnected(phone, since: began, timeout: 3, reopen: {
+        let result = first.waitForConnection(phone, since: began, timeout: 3, reopenTime: 0, reopen: {
             precondition(!first.isOpen)
             reopenCount += 1
             return second
@@ -221,6 +225,68 @@ struct BehaviorTests {
         precondition(monotonicNow().timeIntervalSince(began) < 1.3)
         precondition((lost.writes + replacement.writes).filter { $0[1] == connect }.count == 1)
         print("Lost connection poll recovered seconds", monotonicNow().timeIntervalSince(began))
+    }
+
+    // Test that a dropped channel and failed reopens can recover without resending Connect
+    static func testConnectionReopenRetries() {
+        let channel = FakeChannel()
+        let link = BmapLink(channel: channel)
+        channel.onWrite = { bytes in
+            if bytes[1] == connect { channel.reply(connect, processing, phone) }
+            if bytes[1] == deviceInfo { channel.opened = false; link.rfcommChannelClosed(channel) }
+        }
+        let began = monotonicNow()
+        precondition(link.request(connect, start, [0] + phone)?.operation == processing)
+        let replacement = FakeChannel()
+        let recovered = BmapLink(channel: replacement)
+        replacement.onWrite = { bytes in
+            if bytes[1] == deviceInfo { replacement.reply(deviceInfo, status, phone + [1, 0, 0]) }
+        }
+        var attempts = 0
+        let result = link.waitForConnection(phone, since: began, timeout: 1, reopenTime: 0, reopen: {
+            attempts += 1
+            return attempts < 3 ? nil : recovered
+        })
+        precondition(result == .confirmed && attempts == 3)
+        precondition((channel.writes + replacement.writes).filter { $0[1] == connect }.count == 1)
+    }
+
+    // Test that a disconnect without a reply is confirmed by a reading that shows the device gone
+    static func testUnansweredDisconnect() {
+        let channel = FakeChannel()
+        let link = BmapLink(channel: channel)
+        channel.onWrite = { bytes in
+            if bytes[1] == deviceInfo { channel.reply(deviceInfo, status, phone + [0, 0, 0] + Array("Phone".utf8)) }
+        }
+        precondition(link.waitForConnection(phone, connected: false, since: monotonicNow(), timeout: 1) == .confirmed)
+        precondition(!channel.writes.contains { $0[1] == disconnect })
+    }
+
+    // Test that no blocking reopen starts when too little time is left before the deadline
+    static func testReopenCutoff() {
+        let link = BmapLink(channel: FakeChannel())
+        link.close()
+        var attempts = 0
+        let began = uptime()
+        let result = link.waitForConnection(phone, since: monotonicNow(), timeout: 2, reopenTime: 3, reopen: { attempts += 1; return nil })
+        precondition(result == .timeout && attempts == 0 && uptime() - began < 0.1)
+    }
+
+    // Test that failed reopens respect the deadline and cancellation without spinning
+    static func testConnectionReopenDeadline() {
+        for cancel in [false, true] {
+            let link = BmapLink(channel: FakeChannel())
+            link.close()
+            let began = uptime()
+            var attempts = 0
+            let result = link.waitForConnection(phone, since: monotonicNow(), timeout: cancel ? 2 : 0.4, reopenTime: 0,
+                cancelled: { cancel && uptime() - began > 0.05 },
+                reopen: { attempts += 1; return nil })
+            let elapsed = uptime() - began
+            precondition(result == .timeout && !link.isOpen)
+            precondition(cancel ? elapsed < 0.3 : elapsed >= 0.4 && elapsed < 0.6)
+            precondition(attempts > 0 && attempts < 5)
+        }
     }
 
     // Test that connection readings expire
@@ -451,7 +517,7 @@ struct BehaviorTests {
                 channel.reply(deviceInfo, status, phone + [connected, 0, 0] + Array("Phone".utf8))
             }
         }
-        precondition(link.waitUntilConnected(phone, since: began, timeout: 1) == .confirmed)
+        precondition(link.waitForConnection(phone, since: began, timeout: 1) == .confirmed)
         let elapsed = monotonicNow().timeIntervalSince(began)
         precondition(elapsed < 0.3)
         print("Connection confirmation seconds", elapsed)

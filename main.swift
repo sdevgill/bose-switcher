@@ -40,6 +40,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
     private var cacheSave: DispatchWorkItem?
     private var listNeeded = true
     private var completedActions: [[UInt8]: UUID] = [:]
+    private var unconfirmedActions: [[UInt8]: (connected: Bool, since: Date)] = [:]
     private var displayedFresh: Set<[UInt8]> = []
     private var terminating = false
     // Only the Bluetooth thread touches the link
@@ -241,6 +242,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
 
     private func endSession(available: Bool) {
         session.begin(available: available)
+        unconfirmedActions.removeAll()
         refreshPending = false
         refreshingList = false
         refreshAgain = false
@@ -359,7 +361,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         link?.onDevice = { reading in
             DispatchQueue.main.async {
                 guard self.session.accepts(generation) else { return }
-                self.updateState { $0.merge(reading) }
+                self.receive(reading)
             }
         }
         let computer = hostAddress()
@@ -369,6 +371,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
                 self.updateState { $0.reconcileOrder(addresses, computer: computer) }
                 self.actions = self.actions.filter { addresses.contains($0.key) }
                 self.completedActions = self.completedActions.filter { addresses.contains($0.key) }
+                self.unconfirmedActions = self.unconfirmedActions.filter { addresses.contains($0.key) }
             }
         }
         link?.onBattery = { level in
@@ -403,6 +406,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
                     self.updateState { $0 = DeviceState() }
                     self.actions = [:]
                     self.completedActions = [:]
+                    self.unconfirmedActions = [:]
                     self.listNeeded = true
                     if !self.refreshingList { self.lastList = .distantPast }
                 }
@@ -437,6 +441,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         let disconnecting = macConnected && target.connected
         let needsReading = target.address != hostAddress() && macConnected && !state.isFresh(target.address)
         actionPending = true
+        unconfirmedActions[target.address] = nil
         completedActions[target.address] = UUID()
         let cleanupOwner = completedActions[hostAddress()]
         actions[target.address] = needsReading ? .checking : .working(disconnecting: disconnecting)
@@ -534,21 +539,23 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         let result: ActionResult
         if reply?.operation == failed {
             result = .refused
-        } else if reply == nil && disconnecting {
-            result = .timeout
+        } else if reply != nil && disconnecting {
+            result = .confirmed
         } else {
-            result = disconnecting ? .confirmed : link.waitUntilConnected(target.address, since: began,
+            // Connects, and disconnects that got no reply, are checked against Info readings until the deadline
+            result = link.waitForConnection(target.address, connected: !disconnecting, since: began,
                 timeout: max(0, switchDeadline - uptime()),
                 cancelled: { !self.session.accepts(generation) },
                 reopen: { self.openLink(headphones, generation: generation) })
         }
         // Publish and unlock before giving the Mac's temporary slot back
-        finish(target, disconnecting: disconnecting, result: result, generation: generation)
+        finish(target, disconnecting: disconnecting, result: result, generation: generation, since: began)
     }
 
-    private func finish(_ target: PairedDevice, disconnecting: Bool, result: ActionResult, generation: Int) {
+    private func finish(_ target: PairedDevice, disconnecting: Bool, result: ActionResult, generation: Int, since began: Date? = nil) {
         DispatchQueue.main.sync {
             guard self.session.accepts(generation) else { return }
+            self.unconfirmedActions[target.address] = nil
             switch result {
             case .confirmed:
                 self.updateState { $0.confirm(target.address, connected: !disconnecting) }
@@ -559,6 +566,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
             case .timeout:
                 self.actions[target.address] = .failed(reason: "No answer")
             }
+            // An explicit refusal stays, but a later reading can still prove an unanswered switch worked
+            if result == .timeout, let began {
+                self.unconfirmedActions[target.address] = (connected: !disconnecting, since: began)
+                self.reconcileAction(target.address)
+            }
             self.actionPending = false
             self.clearFeedback(target.address)
             self.requestRefresh(list: self.state.devices.isEmpty)
@@ -567,6 +579,21 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
                 self.requestRefresh(list: self.state.devices.isEmpty)
             }
         }
+    }
+
+    // A later reading can confirm a command whose reply was lost during a switch
+    private func receive(_ reading: DeviceReading) {
+        updateState { $0.merge(reading) }
+        reconcileAction(reading.device.address)
+    }
+
+    private func reconcileAction(_ address: [UInt8]) {
+        guard let expected = unconfirmedActions[address],
+              case .failed = actions[address],
+              state.isFresh(address, since: expected.since),
+              state.devices.first(where: { $0.address == address })?.connected == expected.connected else { return }
+        actions[address] = .idle
+        unconfirmedActions[address] = nil
     }
 
     private func publishCleanupFailure(_ address: [UInt8], owner: UUID?, generation: Int) {
@@ -579,7 +606,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSStatusItem
         let completion = UUID()
         completedActions[address] = completion
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            if self.completedActions[address] == completion { self.actions[address] = .idle }
+            if self.completedActions[address] == completion {
+                self.actions[address] = .idle
+                self.unconfirmedActions[address] = nil
+            }
         }
     }
 

@@ -61,8 +61,9 @@ struct DeviceState {
     private var fresh: Set<[UInt8]> = []
 
     var knownAddresses: [[UInt8]] { membershipKnown ? order : devices.map(\.address) }
-    func isFresh(_ address: [UInt8], at date: Date = monotonicNow()) -> Bool {
-        fresh.contains(address) && date.timeIntervalSince(updatedAt[address] ?? .distantPast) < 5
+    func isFresh(_ address: [UInt8], since began: Date = .distantPast, at date: Date = monotonicNow()) -> Bool {
+        let requestedAt = updatedAt[address] ?? .distantPast
+        return fresh.contains(address) && requestedAt >= began && date.timeIntervalSince(requestedAt) < 5
     }
 
     func displayName(for device: PairedDevice) -> String {
